@@ -6,8 +6,6 @@
 #   build_double    Compile the double-buffer design
 #   run_single      Run + verify the single-buffer design  (Python)
 #   run_double      Run + verify the double-buffer design  (Python)
-#   run_single_cpp  Run + verify the single-buffer design  (C++)
-#   run_double_cpp  Run + verify the double-buffer design  (C++)
 #   trace_single    Run + parse trace -> trace_single.json
 #   trace_double    Run + parse trace -> trace_double.json
 #   clean           Remove all build artifacts
@@ -40,7 +38,7 @@ out_size   = 65536
 trace_size = 8192
 
 .PHONY: all build_single build_double \
-        run_single run_double run_single_cpp run_double_cpp \
+        run_single run_double \
         trace_single trace_double clean
 
 all: build_single build_double
@@ -97,22 +95,6 @@ run_double: build_double
 	python3 ${srcdir}/test.py \
 		-x build/double/final.xclbin -i build/double/insts.bin \
 		-k MLIR_AIE -i1s ${in1_size} -os ${out_size} -t ${trace_size}
-
-# ========================= Run (C++) =====================================
-
-add_one.exe: ${srcdir}/test.cpp
-	rm -rf _build
-	mkdir -p _build
-	cd _build && cmake ${srcdir} -DTARGET_NAME=add_one \
-		-DIN1_SIZE=${in1_size} -DOUT_SIZE=${out_size}
-	cd _build && cmake --build . --config Release
-	cp _build/add_one $@
-
-run_single_cpp: add_one.exe build_single
-	./$< -x build/single/final.xclbin -i build/single/insts.bin -k MLIR_AIE
-
-run_double_cpp: add_one.exe build_double
-	./$< -x build/double/final.xclbin -i build/double/insts.bin -k MLIR_AIE
 
 # ========================= Trace =========================================
 

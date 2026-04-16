@@ -198,8 +198,7 @@ The goal of this task is to understand how ObjectFIFO depth controls the bufferi
 | `add_one_single.py` | **Reference** — single-buffer add-one (int32, depth=1). Read this first. |
 | `add_one_double.py` | **Template** — your task is to enable double buffering. |
 | `addOne.cc` | C++ AIE kernel — adds 1 to each element. |
-| `test.py` | Python test harness (used by `make run_*`). | **TODO: Do we need different test harness??** 
-| `test.cpp` / `CMakeLists.txt` | C++ test harness (used by `make run_*_cpp`). |
+| `test.py` | Python test harness (used by `make run_*`). |
 | `Makefile` | Build system with all targets. |
 | `solutions/` | Reference solution (look only after attempting!). |
 
