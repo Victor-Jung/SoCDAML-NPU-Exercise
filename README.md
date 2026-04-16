@@ -40,7 +40,37 @@ Welcome to the 6th exercise of the SoCDAMl course 2026. In this exercise, we wil
 
 ## Part Two: Bare-Metal C Programming of the SoftHier NPU
 
+### Familiarization with SoftHier
+- How to allocate L1 memory
+- How to use DMA to explicitly load/store data from/to HBM
+  - Hands-on exercise: transfer a matrix from West HBM to South HBM
+- How to use RedMule to trigger matrix multiplication (MatMul) on L1
+- Intra-cluster synchronization vs. global cluster synchronization
+  - Question: Why are both types of barriers necessary?
 
+### Exercise: GEMM on a Single Cluster
+- Implement 2D tiling of matrices and DMA-based 2D data transfer
+  - Question: Why is 2D tiling necessary?
+- Start with a naive GEMM implementation on a single cluster (without double buffering)
+  - Analyze visualized traces
+  - Question: Is the cluster fully utilized? Why or why not?
+  - Introduce the concept of double buffering
+- Guide students to implement double-buffered GEMM on a single cluster
+  - Analyze updated traces
+  - Questions:
+    - What has changed?
+    - Are DMA transfers and RedMule computation overlapping?
+    - Is the cluster now fully utilized?
+
+### Exercise: GEMM on All Clusters
+- Partition the workload across multiple clusters
+  - Each cluster runs the previously implemented double-buffered GEMM
+  - Analyze visualized traces
+  - Question: Do we observe the same high utilization as in the single-cluster case? If not, why?
+- Introduce systolic GEMM
+  - Leverage data locality, inter-cluster data transfer, and reduced HBM traffic
+  - Analyze visualized traces
+  - Question: What improvements can be observed? What changed compared to the previous approach?
 
 ## Part Three: Faster NPU Programming with MLIR and 
 
