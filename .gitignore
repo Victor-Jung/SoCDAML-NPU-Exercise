@@ -1,0 +1,4 @@
+
+build*/
+trace.txt
+*.json
