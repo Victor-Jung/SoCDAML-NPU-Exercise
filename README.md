@@ -298,9 +298,153 @@ Observe again the `add_one_single.py` file. It's never specified which AIE core 
 
 ---
 
+### Distribute and Join
+
+So far every design used a single AIE core.  To exploit the parallelism of the NPU array you need to **distribute** data to multiple cores and **join** their results.  In IRON this is done through two methods on `ObjectFifoHandle`:
+
+- **`split()`**: Takes a consumer handle and fans it out to N sub-FIFOs, each receiving a slice of the original buffer at a given offset.
+- **`join()`**: Takes a producer handle and merges N sub-FIFOs back into one, each contributing its slice at a given offset.
+
+Both methods route data through a **Mem tile** (the intermediate memory tile in the XDNA2 column) which has 512 KB of SRAM for buffering.
+
+#### API Description
+
+```python
+# Distribute: one input → N consumers (via mem tile)
+of_ins = of_in.cons().split(
+    offsets,              # flat element offsets (list of int)
+    obj_types=tile_types, # per-sub-FIFO numpy array types
+    names=[...],          # optional names for each sub-FIFO
+)
+
+# Join: N producers → one output (via mem tile)
+of_outs = of_out.prod().join(
+    offsets,
+    obj_types=tile_types,
+    names=[...],
+)
+```
+
+The `offsets` list gives the **flat element offset** within the parent FIFO buffer where each sub-FIFO's data begins.  The `obj_types` list specifies the **type (and therefore shape)** of each sub-FIFO — these can differ when the partition is non-uniform.
+
+For a **non-uniform** row partition of a matrix (e.g. `rows_per_core = [8, 24, 24, 8]`):
+
+```
+  64 × 128 matrix of int32 (8192 elements, row-major)
+
+  rows_per_core = [8, 24, 24, 8]
+
+  ┌─────────────────────────────────────────────────────────┐
+  │ Core 0: rows   0–7    │   8 rows  │  offset = ?        │
+  ├─────────────────────────────────────────────────────────┤
+  │                        │           │                    │
+  │ Core 1: rows   8–31   │  24 rows  │  offset = ?        │
+  │                        │           │                    │
+  ├─────────────────────────────────────────────────────────┤
+  │                        │           │                    │
+  │ Core 2: rows  32–55   │  24 rows  │  offset = ?        │
+  │                        │           │                    │
+  ├─────────────────────────────────────────────────────────┤
+  │ Core 3: rows  56–63   │   8 rows  │  offset = ?        │
+  └─────────────────────────────────────────────────────────┘
+
+  elems_per_core[i] = rows_per_core[i] × K
+  offset[i] = sum of elems_per_core[0] ... elems_per_core[i-1]
+```
+
+Because the block sizes vary, you **cannot** use the simple formula `chunk × i`.  Instead the offsets are a **cumulative sum** of the per-core element counts.
+
+> **Note on kernel declarations:** MLIR requires that every `func.func` symbol has a unique type signature.  When sub-FIFOs have different sizes, the kernel buffers have different `memref` types.  The C file therefore exports two entry points (`addOneSmall` / `addOneLarge`) — both call the same vectorised implementation.
+
+Each sub-FIFO is connected to a separate `Worker`.  The runtime `fill()` / `drain()` calls operate on the parent FIFO — the hardware handles the scatter/gather automatically.
+
+#### Task 3.2 — Distribute and Join
+
+The goal of this task is to distribute a 64×128 `int32` matrix across 4 AIE cores using a **non-uniform** row partition `[8, 24, 24, 8]`, apply the add-one kernel (+1) on each core in parallel, and join the results back to DRAM.
+
+**Files:** `exercises/02_distribute_join/`
+
+| File | Description |
+|------|-------------|
+| `add_one_distribute.py` | **Template** — contains TODOs for partition parameters + split/join. |
+| `addOne.cc` | C++ AIE kernel (exports `addOneSmall` and `addOneLarge`). |
+| `test.py` | Python test harness (used by `make run`). |
+| `Makefile` | Build system. |
+| `solutions/` | Reference solution (look only after attempting!). |
+
+##### Step 3.2.1 — Study the template
+
+Open [`add_one_distribute.py`](exercises/02_distribute_join/add_one_distribute.py).  The worker loop, kernel declarations, and runtime sequence are already provided.  You need to fill in:
+
+1. `elems_per_core` — element count per core (from `rows_per_core` and `K`).
+2. `of_offsets` — cumulative element offsets (where each core's block starts).
+3. `tile_types` — per-core `np.ndarray` types sized to `elems_per_core[i]`.
+4. The `split()` and `join()` calls using the values above.
+
+Refer to the matrix diagram above.
+
+##### Step 3.2.2 — Complete the TODOs
+
+Replace every `???` placeholder with the correct expressions.
+
+##### Step 3.2.3 — Build and run
+
+```bash
+cd exercises/02_distribute_join
+make build
+make run          # should print PASS
+```
+
+##### Questions
+
+1. What `elems_per_core`, `of_offsets`, and `tile_types` did you compute?  Why can't you use a simple `chunk × i` formula for the offsets?
+2. Through which tile type does the data flow when using `split()` / `join()`?  Why is this intermediate tile needed?
+3. Read the generated MLIR (`build/aie.mlir`).  How many `aie.core` ops are there?  How many unique `memref` types appear in the kernel function declarations?
+4. Compared to the single-core `add_one` from Task 3.1, would you expect this design to be faster?  Why or why not?
+
+<details>
+<summary><strong>Solution</strong></summary>
+
+**Code:**
+
+```python
+elems_per_core = [r * K for r in rows_per_core]
+# = [1024, 3072, 3072, 1024]
+
+of_offsets = []
+acc = 0
+for n in elems_per_core:
+    of_offsets.append(acc)
+    acc += n
+# = [0, 1024, 4096, 7168]
+
+tile_types = [np.ndarray[(n,), np.dtype[dtype]] for n in elems_per_core]
+
+of_ins = of_in.cons().split(
+    of_offsets,
+    obj_types=tile_types,
+    names=[f"in{i}" for i in range(n_cores)],
+)
+
+of_outs = of_out.prod().join(
+    of_offsets,
+    obj_types=tile_types,
+    names=[f"out{i}" for i in range(n_cores)],
+)
+```
+
+**1.** `elems_per_core = [1024, 3072, 3072, 1024]`, `of_offsets = [0, 1024, 4096, 7168]`.  The partition is non-uniform (8, 24, 24, 8 rows), so the simple formula `chunk × i` does not work — each block has a different size.  Instead, offsets are the cumulative sum of `elems_per_core`.
+
+**2.** Data flows through a **Mem tile** (row 1 in the XDNA2 column).  The Mem tile has 512 KB of SRAM and dedicated DMAs — it acts as a data distribution hub.  The Shim tile (row 0) streams the full matrix into the Mem tile, which then scatters the appropriate slices to each AIE compute tile (rows 2–5).  On the output side, the Mem tile gathers slices from all cores before the Shim DMA sends the result to DRAM.
+
+**3.** The generated MLIR contains 4 `aie.core` ops on tiles (0,2), (0,3), (0,4), and (0,5).  There are 2 unique `memref` types in the kernel declarations: `memref<1024xi32>` (for the 8-row cores) and `memref<3072xi32>` (for the 24-row cores), matching the two kernel entry points `addOneSmall` and `addOneLarge`.
+
+**4.** For this small data size (32768 bytes) the improvement may be modest because the DMA transfer overhead through the Mem tile adds latency.  The compute itself (add-one) is very fast, so the bottleneck is data movement rather than computation.  For larger matrices or more compute-intensive kernels, the 4× parallelism would provide more significant speedup.
+
+</details>
+
 *Further data movement exercises:*
 
-- Distribute and join (multicast). Exercise: with passthrough distribute and join some tensors across the array with a specific pattern.
 - Layout transformation: Explain the DMA transform representation with sizes and strides. Ask them to perform a reshape operation, show them two way of doing it (with DMA and with AIE core) and compare performances.
 - Exercise: Chaining passthrough and observe performances difference
 
