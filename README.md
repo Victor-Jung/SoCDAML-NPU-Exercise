@@ -439,7 +439,7 @@ of_outs = of_out.prod().join(
 
 **3.** The generated MLIR contains 4 `aie.core` ops on tiles (0,2), (0,3), (0,4), and (0,5).  There are 2 unique `memref` types in the kernel declarations: `memref<1024xi32>` (for the 8-row cores) and `memref<3072xi32>` (for the 24-row cores), matching the two kernel entry points `addOneSmall` and `addOneLarge`.
 
-**4.** For this small data size (32768 bytes) the improvement may be modest because the DMA transfer overhead through the Mem tile adds latency.  The compute itself (add-one) is very fast, so the bottleneck is data movement rather than computation.  For larger matrices or more compute-intensive kernels, the 4× parallelism would provide more significant speedup.
+**4.** For this small data size there is no improvement because the DMA transfer overhead through the Mem tile adds latency which compensate the parallelization benefit. The compute itself (add-one) is very fast, so the bottleneck is data movement rather than computation. For larger matrices or more compute-intensive kernels, the parallelism would provide more significant speedup.
 
 </details>
 
