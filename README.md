@@ -395,12 +395,12 @@ make build
 make run          # should print PASS
 ```
 
-##### Questions
-
-1. What `elems_per_core`, `of_offsets`, and `tile_types` did you compute?  Why can't you use a simple `chunk × i` formula for the offsets?
-2. Through which tile type does the data flow when using `split()` / `join()`?  Why is this intermediate tile needed?
-3. Read the generated MLIR (`build/aie.mlir`).  How many `aie.core` ops are there?  How many unique `memref` types appear in the kernel function declarations?
-4. Compared to the single-core `add_one` from Task 3.1, would you expect this design to be faster?  Why or why not?
+> **Questions**
+>
+> 1. What `elems_per_core`, `of_offsets`, and `tile_types` did you compute?  Why can't you use a simple `chunk × i` formula for the offsets?
+> 2. Through which tile type does the data flow when using `split()` / `join()`?  Why is this intermediate tile needed?
+> 3. Read the generated MLIR (`build/aie.mlir`).  How many `aie.core` ops are there?  How many unique `memref` types appear in the kernel function declarations?
+> 4. Compared to the single-core `add_one` from Task 3.1, would you expect this design to be faster?  Why or why not?
 
 <details>
 <summary><strong>Solution</strong></summary>
@@ -448,15 +448,198 @@ of_outs = of_out.prod().join(
 - Layout transformation: Explain the DMA transform representation with sizes and strides. Ask them to perform a reshape operation, show them two way of doing it (with DMA and with AIE core) and compare performances.
 - Exercise: Chaining passthrough and observe performances difference
 
-*Notes*
+---
 
-- Explain with small snippet how each data movement primitives works and then for the exercise ask them to use it in the premade application (they just need to fill the gaps) for a specific use:
-    - Single and double buffer. Exercise: perform the transfer single and double buffer but with different types and from/to different tiles than the example. Show them how to get a trace and how to visualize it so they can visualize the double-buffering. Ask them what's the tradeoff of habing "deeper" object fifo.
-    - Distribute and join (multicast). Exercise: with passthrough distribute and join some tensors across the array with a specific pattern.
-    - Layout transformation: Explain the DMA transform representation with sizes and strides. Ask them to perform a reshape operation, show them two way of doing it (with DMA and with AIE core) and compare performances.
-    - Exercise: Chaining passthrough and observe performances difference
+### DMA Layout Transformations
 
-## Improving MatMul for Small N
+The AIE vector unit (`aie::mmul`) multiplies small **sub-tiles** of a matrix — for example, a 4×4 block of A with a 4×8 block of B to produce a 4×8 block of C.  The host stores matrices in **row-major** order, but the vectorized kernel expects data arranged as a sequence of sub-tiles.
+
+Re-arranging the data in on the host CPU or in the AIE core is expensive. Instead, the **DMA** in each tile can re-order data on the fly as it transfers between memory and the AXI stream. This is called a **DMA layout transformation**.
+
+#### Data Layout Transformation Formulation
+
+A DMA layout transformation is expressed as a list of **(size, stride)** pairs — one pair per nesting level, from outermost to innermost. Each pair maps to one level of a nested `for` loop as shown below:
+
+```
+dims_to_stream = [(size_0, stride_0),
+                  (size_1, stride_1),
+                  (size_2, stride_2),
+                  (size_3, stride_3)]
+
+for i0 in range(size_0):       # outermost
+  for i1 in range(size_1):
+    for i2 in range(size_2):
+      for i3 in range(size_3): # innermost
+        buffer[i0*stride_0 + i1*stride_1 + i2*stride_2 + i3*stride_3]
+```
+
+Not all DMAs are made equal, the number of dimensions supported depends on where they are in the NPU:
+
+- **Compute / Shim tiles** support up to **3 dimensions**.
+- **Mem tiles** support up to **4 dimensions** — which is why the `forward()` through a Mem tile is used for matrix tiling.
+
+#### Example — Tiling Matrix A for the Vectorized Kernel
+
+Consider a 64×64 `int16` matrix A stored row-major in the Mem tile.  The vectorized kernel with intrinsic dimensions **(r=4, s=4)** needs A delivered as 16×16 sub-tiles of 4×4 elements each:
+
+```
+  Row-major 64×64 matrix A
+  ┌──────────┬──────────┬─ ─ ─ ─ ─┐
+  │ sub-tile │ sub-tile │         │
+  │ (0,0)    │ (0,1)    │   ...   │    ← rows 0–3
+  │ 4×4      │ 4×4      │         │
+  ├──────────┼──────────┼─ ─ ─ ─ ─┤
+  │ (1,0)    │ (1,1)    │         │    ← rows 4–7
+  │          │          │         │
+  ├─ ─ ─ ─ ─ ┼─ ─ ─ ─ ─ ┼─ ─ ─ ─ ─┤
+  │   ...    │   ...    │         │
+  └──────────┴──────────┴─ ─ ─ ─ ─┘
+
+  DMA reads sub-tiles in order: (0,0), (0,1), …, (0,15), (1,0), (1,1), …, (15,15)
+```
+
+The 4 loop levels and their (size, stride):
+
+| Level | Iterates over | size | stride | Why |
+|-------|--------------|------|--------|-----|
+| 0 (outer) | sub-tile row groups | m/r = 16 | r × k = 256 | jump r=4 full rows |
+| 1 | sub-tile col groups | k/s = 16 | s = 4 | jump s=4 columns |
+| 2 | rows within sub-tile | r = 4 | k = 64 | one full row of A |
+| 3 (inner) | cols within sub-tile | s = 4 | 1 | consecutive elements |
+
+With m, k, and n representing the L1 tile size which is 64. So the transform is:
+
+```python
+a_dims = [(m//r, r*k), (k//s, s), (r, k), (s, 1)]
+       = [(16,  256),  (16,  4),  (4, 64), (4, 1)]
+```
+
+The same reasoning applies to B (with sub-tile size s×t) and to C (which must be **un-tiled** from kernel output order back to row-major).
+
+#### IRON Python API
+
+In IRON, the transform is passed via the `dims_to_stream` parameter of the `ObjectFifo` or the `forward()` call:
+
+```python
+# Shim → Mem tile (row-major data from DRAM)
+inA = ObjectFifo(a_ty, name="inA")
+
+# Mem tile → Compute tile (tiled data — transform applied here)
+memA = inA.cons().forward(name="memA", dims_to_stream=a_dims)
+```
+
+The `forward()` creates an `objectfifo.link` through the Mem tile.  The Mem-tile DMA reads from its local buffer using the `dims_to_stream` pattern, re-ordering the data before pushing it onto the AXI stream to the compute tile.
+
+#### Task 3.3 — Layout Transformation for MatMul
+
+In this task you will complete a **vectorized** 128×128 `int16` matrix multiplication that uses DMA layout transforms to feed the AIE vector unit.  A **scalar** baseline design (without transforms) is provided for comparison.
+
+**Files:** `exercises/03_layout_transform/`
+
+| File | Description |
+|------|-------------|
+| `matmul_scalar.py` | **Given** — scalar matmul with no layout transformation. |
+| `matmul_vectorized.py` | **Template** — fill in the three `dims_to_stream` transforms. |
+| `mm.cc` | C++ kernels: scalar + vectorized matmul and zero. |
+| `test.py` | Testbench for functional corectness and latency measurement. |
+| `Makefile` | Available targets: `build_scalar`, `build_vectorized`, `run_scalar`, `run_vectorized`. |
+| `solutions/` | Reference solution (look only after attempting!). |
+
+**Parameters:**
+
+| Symbol | Value | Meaning |
+|--------|-------|---------|
+| M, K, N | 128 | outer matrix dimensions |
+| m, k, n | 64 | tile dimensions (L1 buffer) |
+| r | 4 | A sub-tile rows, C sub-tile rows |
+| s | 4 | A sub-tile cols, B sub-tile rows |
+| t | 8 | B sub-tile cols, C sub-tile cols |
+
+##### Step 3.3.1 — Study the scalar baseline
+
+```bash
+cd exercises/03_layout_transform
+make build_scalar
+make run_scalar       # should print PASS + latency
+```
+
+Read [`matmul_scalar.py`](exercises/03_layout_transform/matmul_scalar.py).  Note that `forward()` has **no** `dims_to_stream` — data stays row-major.  The scalar kernel (`matmul_scalar_i16_i16` in `mm.cc`) is a simple triple-nested loop.
+
+##### Step 3.3.2 — Derive the DMA transforms
+
+Open [`matmul_vectorized.py`](exercises/03_layout_transform/matmul_vectorized.py).  Three transforms are marked `???`:
+
+1. **`a_dims`** — re-tile A from row-major (m×k) to (r×s) swizzled layout.
+2. **`b_dims`** — re-tile B from row-major (k×n) to (s×t) swizzled layout.
+3. **`c_dims`** — un-tile C from (r×t) swizzled layout back to row-major (m×n).
+
+For each, write 4 `(size, stride)` pairs. Use the nested-loop model: identify what each loop level iterates over (sub-tile groups or elements within a sub-tile) and compute the stride and size from the matrix layout.
+
+##### Step 3.3.3 — Build and compare
+
+```bash
+make build_vectorized
+make run_vectorized   # should print PASS + latency
+```
+
+Compare the latency numbers with the scalar baseline from step 3.3.1.
+
+##### Questions
+
+1. Write out the 4 `(size, stride)` tuples you computed for `a_dims`, `b_dims`, and `c_dims`.  For each, explain what the four loop levels iterate over.
+2. Why does the C transform have a **different loop ordering** than A and B?  (Hint: think about which direction the re-arrangement goes.)
+3. Why must the Mem tile be used for this transform instead of the compute tile's DMA?
+4. Compare the latency of the scalar and vectorized designs. How large is the speedup?  What contributes to it besides vectorization? Hint: take a look at the cpp kernel. 
+
+<details>
+<summary><strong>Solution</strong></summary>
+
+**Code:**
+
+```python
+# A: row-major m×k → (r×s)-tiled
+a_dims = [(m // r, r * k), (k // s, s), (r, k), (s, 1)]
+       # = [(16, 256), (16, 4), (4, 64), (4, 1)]
+
+# B: row-major k×n → (s×t)-tiled
+b_dims = [(k // s, s * n), (n // t, t), (s, n), (t, 1)]
+       # = [(16, 256), (8, 8), (4, 64), (8, 1)]
+
+# C: (r×t)-tiled → row-major m×n
+c_dims = [(m // r, r * n), (r, t), (n // t, r * t), (t, 1)]
+       # = [(16, 256), (4, 8), (8, 32), (8, 1)]
+```
+
+**1.**
+
+- **`a_dims`**: `[(16, 256), (16, 4), (4, 64), (4, 1)]`
+  - Level 0: 16 groups of r=4 rows (stride 256 = 4 full rows of 64 elements)
+  - Level 1: 16 groups of s=4 columns (stride 4 = next sub-tile column block)
+  - Level 2: 4 rows within sub-tile (stride 64 = one full row of A)
+  - Level 3: 4 columns within sub-tile (stride 1 = consecutive)
+
+- **`b_dims`**: `[(16, 256), (8, 8), (4, 64), (8, 1)]`
+  - Level 0: 16 groups of s=4 rows (stride 256 = 4 full rows of 64 elements)
+  - Level 1: 8 groups of t=8 columns (stride 8 = next sub-tile column block)
+  - Level 2: 4 rows within sub-tile (stride 64 = one full row of B)
+  - Level 3: 8 columns within sub-tile (stride 1 = consecutive)
+
+- **`c_dims`**: `[(16, 256), (4, 8), (8, 32), (8, 1)]`
+  - Level 0: 16 groups of r=4 rows (stride 256 = 4×64 in tiled buffer)
+  - Level 1: 4 rows within sub-tile (stride 8 = one row of r×t sub-tile)
+  - Level 2: 8 groups of t=8 columns (stride 32 = one r×t sub-tile)
+  - Level 3: 8 columns within sub-tile (stride 1 = consecutive)
+
+**2.** For A and B, the DMA reads from a **row-major** buffer and outputs in **tiled** order — the outer loops iterate over sub-tile groups, the inner loops over elements within a sub-tile.  For C, the DMA reads from a **tiled** buffer and must output in **row-major** order.  To produce row-major output, the loop must visit all column-groups for each row before moving to the next row — so the "rows within sub-tile" level (level 1) comes before the "column-groups" level (level 2), which is the opposite ordering from A/B.
+
+**3.** Compute tile DMAs support only **3 dimensions** of address generation.  The tiling transforms require **4 dimensions** (sub-tile row group, sub-tile col group, row within tile, col within tile).  The Mem tile supports **4-dimensional** DMA descriptors, which is why `forward()` routes data through the Mem tile.
+
+**4.** The vectorized design is significantly faster (~60× speedup). The speedup comes from: (a) the `aie::mmul<4,4,8>` intrinsic executes 4×4×8 = 128 MAC operations per instruction vs. 1 for the scalar kernel, and (b) the 2×2 spatial unrolling further improves pipeline utilization.  The DMA layout transform adds no cycle cost as its execution is overlapped with compute with double-buffering.
+
+</details>
+
+
+---
 
 - Exercise: From the matmul kernel extend it to fuse a Relu in there using max vector instrisics
 - Final exercise -> Students will have to write more code but will start from the whole array design.

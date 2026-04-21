@@ -40,7 +40,7 @@ build/addOne.cc.o: ${srcdir}/addOne.cc
 
 # ========================= MLIR generation ===============================
 
-build/aie.mlir: ${srcdir}/solutions/add_one_distribute_solution.py
+build/aie.mlir: ${srcdir}/add_one_distribute.py
 	mkdir -p ${@D}
 	python3 $< -i1s ${in1_size} -os ${out_size} > $@
 
