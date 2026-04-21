@@ -4,11 +4,9 @@
 # │  GIVEN — Dual-tile parallel vectorized matrix multiplication        │
 # │                                                                     │
 # │  Two AIE cores each compute half of the output matrix C = A × B.   │
-# │  A single shim-to-mem FIFO is split at the mem tile to distribute  │
-# │  A tile-rows to two cores.  B is broadcast from mem tile to both   │
-# │  cores.  Each core outputs C tiles via its own mem-to-shim path.   │
-# │  DMA layout transforms (same as exercise 03) rearrange data for    │
-# │  the vectorized kernel.                                             │
+# │  Core 0 handles tile-rows 0–1, Core 1 handles tile-rows 2–3.       │
+# │  Each core has its own A, B and C ObjectFIFOs forwarded through     │
+# │  the mem tile with DMA layout transforms (same as exercise 03).     │
 # └──────────────────────────────────────────────────────────────────────┘
 #
 # Usage:
@@ -20,7 +18,7 @@ import sys
 
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer
-from aie.iron.device import NPU2Col1
+from aie.iron.device import NPU2
 from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorTiler2D
 
@@ -48,8 +46,6 @@ def matmul_dual():
     A_ty = np.ndarray[(M * K,), np.dtype[dtype]]
     B_ty = np.ndarray[(K * N,), np.dtype[dtype]]
     C_ty = np.ndarray[(M * N,), np.dtype[dtype]]
-    # Each inA element carries 2 A tiles (one per core) concatenated
-    a_pair_ty = np.ndarray[(2 * m * k,), np.dtype[dtype]]
     a_ty = np.ndarray[(m, k), np.dtype[dtype]]
     b_ty = np.ndarray[(k, n), np.dtype[dtype]]
     c_ty = np.ndarray[(m, n), np.dtype[dtype]]
@@ -68,25 +64,22 @@ def matmul_dual():
     c_dims = [(m // r, r * n), (r, t), (n // t, r * t), (t, 1)]
 
     # ------------------------------------------------------------------
-    # 5. ObjectFIFOs
+    # 5. ObjectFIFOs — one set per core, forwarded through mem tile
     # ------------------------------------------------------------------
-    # A: one shim FIFO carrying 2 tiles, split at mem tile to 2 cores
-    # (NPU2Col1 shim has only 2 input + 2 output DMA channels)
-    inA = ObjectFifo(a_pair_ty, name="inA")
-    memA_fifos = inA.cons().split(
-        offsets=[0, m * k],
-        obj_types=[a_ty, a_ty],
-        names=["memA0", "memA1"],
-        dims_to_stream=[a_dims, a_dims],
-    )
+    inA0 = ObjectFifo(a_ty, name="inA0")
+    memA0 = inA0.cons().forward(name="memA0", dims_to_stream=a_dims)
 
-    # B: one shim FIFO, forwarded through mem tile, broadcast to both cores
-    inB = ObjectFifo(b_ty, name="inB")
-    memB = inB.cons().forward(name="memB", dims_to_stream=b_dims)
+    inB0 = ObjectFifo(b_ty, name="inB0")
+    memB0 = inB0.cons().forward(name="memB0", dims_to_stream=b_dims)
 
-    # C: separate per-core paths (2 shim input channels)
     memC0 = ObjectFifo(c_ty, name="memC0")
     outC0 = memC0.cons().forward(name="outC0", dims_to_stream=c_dims)
+
+    inA1 = ObjectFifo(a_ty, name="inA1")
+    memA1 = inA1.cons().forward(name="memA1", dims_to_stream=a_dims)
+
+    inB1 = ObjectFifo(b_ty, name="inB1")
+    memB1 = inB1.cons().forward(name="memB1", dims_to_stream=b_dims)
 
     memC1 = ObjectFifo(c_ty, name="memC1")
     outC1 = memC1.cons().forward(name="outC1", dims_to_stream=c_dims)
@@ -111,26 +104,25 @@ def matmul_dual():
     # ------------------------------------------------------------------
     worker0 = Worker(
         core_fn,
-        [memA_fifos[0].cons(), memB.cons(), memC0.prod(), zero_fn, matmul_fn],
+        [memA0.cons(), memB0.cons(), memC0.prod(), zero_fn, matmul_fn],
     )
     worker1 = Worker(
         core_fn,
-        [memA_fifos[1].cons(), memB.cons(), memC1.prod(), zero_fn, matmul_fn],
+        [memA1.cons(), memB1.cons(), memC1.prod(), zero_fn, matmul_fn],
     )
 
     # ------------------------------------------------------------------
     # 8. Runtime sequence
     # ------------------------------------------------------------------
-    # A pair taps: each sends 2 consecutive tile-rows of A (128×K),
-    # repeated N_div_n times for each output column
-    a_pair_taps = TensorTiler2D.group_tiler(
-        (M, K), (n_cores * m, k), (1, K_div_k), pattern_repeat=N_div_n
+    # A taps: each tap covers 1 tile-row of A, repeated N_div_n times
+    a_taps = TensorTiler2D.group_tiler(
+        (M, K), (m, k), (1, K_div_k), pattern_repeat=N_div_n
     )
     # B tap: all K×N tiles in column-major tile-group order
     b_tap = TensorTiler2D.group_tiler(
         (K, N), (k, n), (K_div_k, N_div_n), tile_group_col_major=True
     )[0]
-    # C taps: each covers 1 tile-row of C
+    # C taps: each tap covers 1 tile-row of C
     c_taps = TensorTiler2D.group_tiler(
         (M, N), (m, n), (1, N_div_n)
     )
@@ -139,15 +131,17 @@ def matmul_dual():
     with rt.sequence(A_ty, B_ty, C_ty) as (A, B, C):
         rt.start(worker0, worker1)
 
-        # Process in pairs: pair 0 → A rows 0-1, pair 1 → A rows 2-3
+        # Process tile-rows in pairs: (0,2), (1,3)
         rows_per_core = M_div_m // n_cores  # 2
         for pair in range(rows_per_core):
-            tr0 = 2 * pair          # core 0 tile-row index
-            tr1 = 2 * pair + 1      # core 1 tile-row index
+            tr0 = pair                       # core 0: tile-rows 0, 1
+            tr1 = pair + rows_per_core       # core 1: tile-rows 2, 3
 
             tg = rt.task_group()
-            rt.fill(inA.prod(), A, tap=a_pair_taps[pair], task_group=tg)
-            rt.fill(inB.prod(), B, tap=b_tap, task_group=tg)
+            rt.fill(inA0.prod(), A, tap=a_taps[tr0], task_group=tg)
+            rt.fill(inA1.prod(), A, tap=a_taps[tr1], task_group=tg)
+            rt.fill(inB0.prod(), B, tap=b_tap, task_group=tg)
+            rt.fill(inB1.prod(), B, tap=b_tap, task_group=tg)
             rt.drain(outC0.cons(), C, tap=c_taps[tr0], task_group=tg, wait=True)
             rt.drain(outC1.cons(), C, tap=c_taps[tr1], task_group=tg, wait=True)
             rt.finish_task_group(tg)
@@ -155,7 +149,7 @@ def matmul_dual():
     # ------------------------------------------------------------------
     # 9. Compile
     # ------------------------------------------------------------------
-    return Program(NPU2Col1(), rt).resolve_program(SequentialPlacer())
+    return Program(NPU2(), rt).resolve_program(SequentialPlacer())
 
 
 if __name__ == "__main__":

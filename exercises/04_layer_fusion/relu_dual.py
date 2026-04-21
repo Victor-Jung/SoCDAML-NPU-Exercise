@@ -17,7 +17,7 @@ import sys
 
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer
-from aie.iron.device import NPU2Col1
+from aie.iron.device import NPU2
 from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorTiler2D
 
@@ -112,7 +112,7 @@ def relu_dual():
     # ------------------------------------------------------------------
     # 8. Compile
     # ------------------------------------------------------------------
-    return Program(NPU2Col1(), rt).resolve_program(SequentialPlacer())
+    return Program(NPU2(), rt).resolve_program(SequentialPlacer())
 
 
 if __name__ == "__main__":
