@@ -17,6 +17,9 @@ srcdir := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 MLIR_AIE_DIR ?= /scratch/jungvi/mlir-aie
 include ${MLIR_AIE_DIR}/programming_examples/makefile-common
 
+XRT_DIR ?= ${MLIR_AIE_DIR}/xdna-driver/xrt/build/Release/opt/xilinx/xrt
+export PATH := ${XRT_DIR}/bin:${PATH}
+
 PEANO_INSTALL_DIR ?= $(shell python3 -c "import aie.utils.config; print(aie.utils.config.peano_install_dir())" 2>/dev/null)
 ifeq ($(PEANO_INSTALL_DIR),)
 $(error PEANO_INSTALL_DIR not set and auto-detection failed. Set it or install llvm-aie.)
