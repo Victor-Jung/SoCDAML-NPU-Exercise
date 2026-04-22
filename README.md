@@ -669,14 +669,14 @@ This **sequential** approach pays two unnecessary costs:
 | `matmul_dual.py` | **Given**: 2-core parallel vectorized matmul. |
 | `relu_dual_scalar.py` | **Given**: 2-core parallel relu using `relu_scalar_i16`. |
 | `relu_dual.py` | **Given**: 2-core parallel relu using `relu_i16`. |
-| `matmul_relu_fused.py` | **Given**: 2-core fused matmul+relu. |
+| `matmul_relu_fused.py` | **Template**: 2-core fused matmul+relu with `???` placeholders. |
 | `matmul_relu_pipeline.py` | **Template**: 2-stage pipeline design with `???` placeholders. |
 | `test_sequential_cpp.cpp` | C++ test: matmul + relu as two separate xclbin loads. |
 | `test_relu_cpp.cpp` | C++ relu-only test harness (verify + benchmark). |
 | `test_cpp.cpp` | C++ test for single-xclbin designs (fused, pipeline). |
 | `collect_trace.py` | Runs relu xclbin with tracing enabled, writes `trace.txt`. |
 | `Makefile` | Build system: see targets below. |
-| `solutions/` | `mm_solution.cc`, `matmul_relu_pipeline_solution.py` |
+| `solutions/` | `mm_solution.cc`, `matmul_relu_fused_solution.py`, `matmul_relu_pipeline_solution.py` |
 
 ##### Step 3.4.1 — Implement scalar ReLU (Task 1a)
 
@@ -774,24 +774,16 @@ This is precisely why **layer fusion** (Steps 3.4.3-3.4.4) is valuable: it elimi
 
 ##### Step 3.4.3 — Kernel fusion (Task 2)
 
-Now implement `relu_fused_i16` in `mm.cc` — same logic as `relu_i16` (a separate symbol is needed for the fused design to link independently).
+First, implement `relu_fused_i16` in `mm.cc` — same logic as `relu_i16` (a separate symbol is needed for the fused design to link independently).
 
-The **given** design [`matmul_relu_fused.py`](exercises/04_layer_fusion/matmul_relu_fused.py) calls `relu_fused_i16` in-place on the C tile right after the K-loop completes, before releasing it to the DMA:
+Then open [`matmul_relu_fused.py`](exercises/04_layer_fusion/matmul_relu_fused.py).  This design has the same structure as `matmul_dual.py` (the ObjectFIFOs, DMA transforms, and runtime sequence are given), but the **core function** and **Worker instantiation** are left for you to fill in.
 
-```python
-# In the core function (given):
-for _ in range_(tiles_per_core):
-    elem_out = of_c.acquire(1)
-    zero(elem_out)
-    for _ in range_(K_div_k):
-        elem_in_a = of_a.acquire(1)
-        elem_in_b = of_b.acquire(1)
-        matmul(elem_in_a, elem_in_b, elem_out)
-        of_a.release(1)
-        of_b.release(1)
-    relu(elem_out, elem_out)   # ← fused relu, applied in-place
-    of_c.release(1)
-```
+Your core function should:
+1. Loop over `tiles_per_core` output tiles.
+2. For each tile: acquire C, zero it, run the K-loop (acquire A/B → matmul → release A/B).
+3. **After the K-loop**, apply `relu` *in-place* on the C tile before releasing it.
+
+Use `matmul_dual.py`'s `core_fn` as your starting point — you need to add the `relu` kernel call and update the Worker argument list to include `relu_fn`.
 
 Build and test:
 
@@ -817,6 +809,33 @@ void relu_fused_i16(const int16 *__restrict in, int16 *__restrict out) {
         aie::store_v(out + i, aie::max(v, zeros));
     }
 }
+```
+
+**Core function:**
+```python
+def core_fn(of_a, of_b, of_c, zero, matmul, relu):
+    for _ in range_(tiles_per_core):
+        elem_out = of_c.acquire(1)
+        zero(elem_out)
+        for _ in range_(K_div_k):
+            elem_in_a = of_a.acquire(1)
+            elem_in_b = of_b.acquire(1)
+            matmul(elem_in_a, elem_in_b, elem_out)
+            of_a.release(1)
+            of_b.release(1)
+        relu(elem_out, elem_out)   # fused relu, applied in-place
+        of_c.release(1)
+
+worker0 = Worker(
+    core_fn,
+    [memA0.cons(), memB0.cons(), memC0.prod(),
+     zero_fn, matmul_fn, relu_fn],
+)
+worker1 = Worker(
+    core_fn,
+    [memA1.cons(), memB1.cons(), memC1.prod(),
+     zero_fn, matmul_fn, relu_fn],
+)
 ```
 
 **1.** It is safe because the vectorized kernel reads a full 32-element vector via `aie::load_v` before writing it back via `aie::store_v`.  The read and write never overlap within the same vector.  It would be unsafe if the kernel read and wrote overlapping but non-identical sub-regions (e.g., a sliding-window filter), because the write could corrupt data not yet read.

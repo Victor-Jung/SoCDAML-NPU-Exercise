@@ -87,34 +87,31 @@ def matmul_relu_fused():
     # ------------------------------------------------------------------
     # 6. Core function — matmul + fused relu
     # ------------------------------------------------------------------
-    # ┌──────────────────────────────────────────────────────────────┐
-    # │  YOUR CODE HERE                                              │
-    # │                                                              │
-    # │  Write core_fn based on the matmul-only version in           │
-    # │  matmul_dual.py.  After the K-loop completes, apply relu     │
-    # │  *in-place* on the output tile before releasing it.          │
-    # │                                                              │
-    # │  Hint: relu(elem_out, elem_out) — same buffer for in/out.   │
-    # └──────────────────────────────────────────────────────────────┘
-    def core_fn(???):
-        ???
+    def core_fn(of_a, of_b, of_c, zero, matmul, relu):
+        for _ in range_(tiles_per_core):
+            elem_out = of_c.acquire(1)
+            zero(elem_out)
+            for _ in range_(K_div_k):
+                elem_in_a = of_a.acquire(1)
+                elem_in_b = of_b.acquire(1)
+                matmul(elem_in_a, elem_in_b, elem_out)
+                of_a.release(1)
+                of_b.release(1)
+            relu(elem_out, elem_out)
+            of_c.release(1)
 
     # ------------------------------------------------------------------
     # 7. Workers
     # ------------------------------------------------------------------
-    # ┌──────────────────────────────────────────────────────────────┐
-    # │  YOUR CODE HERE                                              │
-    # │                                                              │
-    # │  Instantiate worker0 and worker1 with the correct args.      │
-    # │  The argument list must match core_fn's parameters.          │
-    # └──────────────────────────────────────────────────────────────┘
     worker0 = Worker(
         core_fn,
-        [???],
+        [memA0.cons(), memB0.cons(), memC0.prod(),
+         zero_fn, matmul_fn, relu_fn],
     )
     worker1 = Worker(
         core_fn,
-        [???],
+        [memA1.cons(), memB1.cons(), memC1.prod(),
+         zero_fn, matmul_fn, relu_fn],
     )
 
     # ------------------------------------------------------------------

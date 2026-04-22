@@ -61,7 +61,8 @@ TRACE_SUMMARY = python3 ${MLIR_AIE_DIR}/python/utils/trace/get_trace_summary.py
 # Override to use solution kernel file
 KERNEL_SRC ?= ${srcdir}/mm.cc
 
-# Override to build pipeline with the solution
+# Override to build fused/pipeline with the solution
+FUSED_DESIGN ?= ${srcdir}/matmul_relu_fused.py
 PIPELINE_DESIGN ?= ${srcdir}/matmul_relu_pipeline.py
 
 .PHONY: all clean \
@@ -172,7 +173,7 @@ run_sequential: build_matmul_dual build_relu_dual build/test_sequential_cpp buil
 	${TRACE_SUMMARY} --input trace_relu.json
 
 # ========================= Fused design (Task 2) =========================
-build/fused/aie.mlir: ${srcdir}/matmul_relu_fused.py
+build/fused/aie.mlir: $(FUSED_DESIGN)
 	mkdir -p ${@D}
 	python3 $< > $@
 
