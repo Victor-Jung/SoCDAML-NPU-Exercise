@@ -8,7 +8,7 @@
 # Usage:
 #   python3 test.py -x build/<variant>/final.xclbin \
 #                   -i build/<variant>/insts.bin \
-#                   -k MLIR_AIE -i1s 131072 -i2s 131072 -os 131072
+#                   -k MLIR_AIE -i1s 2097152 -i2s 2097152 -os 33554432
 #
 import numpy as np
 import sys
@@ -17,7 +17,7 @@ import aie.iron as iron
 import aie.utils.test as test_utils
 from aie.utils import DefaultNPURuntime
 
-M, K, N = 256, 256, 256
+M, K, N = 4096, 256, 4096
 WARMUP_ITERS = 5
 BENCH_ITERS = 20
 

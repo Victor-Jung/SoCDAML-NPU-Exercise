@@ -641,6 +641,280 @@ c_dims = [(m // r, r * n), (r, t), (n // t, r * t), (t, 1)]
 
 ---
 
+### Layer Fusion
+
+In a real inference pipeline, matrix multiplication is almost always followed by an activation function such as [**ReLU** (Rectified Linear Unit)](https://en.wikipedia.org/wiki/Rectified_linear_unit). A sequential execution runs matmul and ReLU as two separate NPU invocations:
+
+1. Load the matmul xclbin → run → write C to DRAM.
+2. Load the relu xclbin → run → write D to DRAM.
+
+This **sequential** approach pays two unnecessary costs:
+- **DRAM round-trip** for the intermediate matrix C.
+- **xclbin reload** latency between the two kernels.
+
+**Layer fusion** eliminates these costs by combining matmul and relu into a single NPU invocation. In this task, we explore two fusion strategies:
+
+| Strategy | Description |
+|----------|-------------|
+| **Kernel fusion** | Each core runs matmul then calls relu *in-place* on the C tile before releasing it.  No extra data movement — relu runs on data already in L1. |
+| **Pipeline fusion** | Core 0 runs matmul and streams C tiles to Core 1 via a direct core-to-core ObjectFifo.  Core 1 applies relu and writes D out.  Matmul on tile N+1 overlaps with relu on tile N. |
+
+#### Task 3.4 — Layer Fusion
+
+**Files:** `exercises/04_layer_fusion/`
+
+| File | Description |
+|------|-------------|
+| `mm.cc` | **Template**: given matmul + zero kernels; student writes relu kernels. |
+| `matmul_dual.py` | **Given**: 2-core parallel vectorized matmul. |
+| `relu_dual_scalar.py` | **Given**: 2-core parallel relu using `relu_scalar_i16`. |
+| `relu_dual.py` | **Given**: 2-core parallel relu using `relu_i16`. |
+| `matmul_relu_fused.py` | **Given**: 2-core fused matmul+relu. |
+| `matmul_relu_pipeline.py` | **Template**: 2-stage pipeline design with `???` placeholders. |
+| `test_sequential_cpp.cpp` | C++ test: matmul + relu as two separate xclbin loads. |
+| `test_relu_cpp.cpp` | C++ relu-only test harness (verify + benchmark). |
+| `test_cpp.cpp` | C++ test for single-xclbin designs (fused, pipeline). |
+| `collect_trace.py` | Runs relu xclbin with tracing enabled, writes `trace.txt`. |
+| `Makefile` | Build system: see targets below. |
+| `solutions/` | `mm_solution.cc`, `matmul_relu_pipeline_solution.py` |
+
+##### Step 3.4.1 — Implement scalar ReLU (Task 1a)
+
+Open [`mm.cc`](exercises/04_layer_fusion/mm.cc).  The `matmul_i16_i16` and `zero_i16` kernels are given.  Implement `relu_scalar_i16`:
+
+```cpp
+void relu_scalar_i16(const int16 *__restrict in, int16 *__restrict out) {
+    // ┌──────────────────────────────────────────────────────┐
+    // │  YOUR CODE HERE                                      │
+    // └──────────────────────────────────────────────────────┘
+}
+```
+
+Build and test:
+
+```bash
+cd exercises/04_layer_fusion
+make run_sequential_scalar    # builds matmul_dual + relu_dual_scalar, runs test
+```
+
+The test runs matmul ($4096 \times 256 \times 4096$) as one xclbin, reloads, then runs your scalar relu ($4096 \times 4096$) as a second xclbin, and verifies $D = \text{relu}(A \times B)$.
+
+##### Step 3.4.2 — Implement vectorized ReLU (Task 1b)
+
+In the same `mm.cc`, implement `relu_i16` using AIE vector intrinsics:
+
+```cpp
+void relu_i16(const int16 *__restrict in, int16 *__restrict out) {
+    // ┌──────────────────────────────────────────────────────┐
+    // │  YOUR CODE HERE                                      │
+    // └──────────────────────────────────────────────────────┘
+}
+```
+
+Build and test with:
+
+```bash
+make run_sequential           # builds matmul_dual + relu_dual, runs test
+```
+
+Compare the relu latency from `run_sequential_scalar` vs `run_sequential`.  The C++ test harness reports separate timings for the matmul, the xclbin reload, and the relu stages.
+
+Both targets also collect a hardware **trace** of the relu execution.  The relu kernels contain `event0()` / `event1()` markers that bracket the computation.  The Makefile automatically parses the trace and prints a summary.  You will find:
+
+- **`trace_relu_scalar.json`** / **`trace_relu.json`** — open these in [Perfetto](https://ui.perfetto.dev/) for visual inspection.
+- A **trace summary** on the terminal showing per-tile kernel cycle counts (between `event0` and `event1`).
+
+> **Questions**
+>
+> 1. Which AIE instrinsics can be used to vectorize ReLU? You can search in the [AIE API overview](https://docs.amd.com/r/en-US/ug1079-ai-engine-kernel-coding/Introduction-to-Scalar-and-Vector-Programming?tocId=PoB6whEdgn2TBAwBXuXYDw) or [documentation](https://xilinx.github.io/aie_api/index.html).
+> 2. How many elements can the intrinsic process at once?  How does this compare to the scalar loop?
+> 3. Look at the sequential test output.  What fraction of the total time is spent on the xclbin reload?  Why is this cost unavoidable in the sequential approach?
+> 4. Open both traces in Perfetto and look at the trace summary.  What is the per-tile kernel execution time (between `event0` and `event1`) for the scalar relu vs. the vectorized relu?  What is the **kernel-level speedup ratio**?
+> 5. Now look at the **end-to-end relu latency** reported by the C++ test harness.  What speedup do you observe?  Why is it lower than the kernel-level speedup from the trace?  What does this tell you about where the bottleneck has shifted?
+
+<details>
+<summary><strong>Solution</strong></summary>
+
+**Scalar ReLU:**
+```cpp
+void relu_scalar_i16(const int16 *__restrict in, int16 *__restrict out) {
+    for (unsigned i = 0; i < m * n; i++) {
+        out[i] = (in[i] < 0) ? (int16)0 : in[i];
+    }
+}
+```
+
+**Vectorized ReLU:**
+```cpp
+void relu_i16(const int16 *__restrict in, int16 *__restrict out) {
+    constexpr int vec_factor = 32;
+    aie::vector<int16, vec_factor> zeros = aie::zeros<int16, vec_factor>();
+    for (unsigned i = 0; i < m * n; i += vec_factor) {
+        aie::vector<int16, vec_factor> v = aie::load_v<vec_factor>(in + i);
+        aie::store_v(out + i, aie::max(v, zeros));
+    }
+}
+```
+
+**1.** ReLU of $x$ can be expressed as $\max(x, 0)$.
+
+**2.** Each `aie::max` processes 32 `int16` elements at once (one 512-bit vector).  The scalar loop processes 1 element per iteration, a 32× throughput difference per instruction.
+
+**3.** The reload takes ~0.5–0.7 ms, which is a small fraction of the total sequential time (~18.2 ms for vectorized, ~70.5 ms for scalar).  This cost is unavoidable because the NPU can only hold one xclbin at a time, switching from the matmul configuration to the relu configuration requires reprogramming the tiles.
+
+**4.** The trace summary reports per-tile kernel cycles (between `event0`/`event1`): scalar relu takes **~47,100 cycles** per tile, vectorized relu takes **~1,410 cycles**, a **~33× kernel-level speedup**, consistent with the 32-wide vector factor.
+
+**5.** The C++ test harness measures end-to-end relu latency including all DDR ↔ NPU data transfers: scalar ~54 ms, vectorized ~2.0 ms. Only a **~27× end-to-end speedup**, lower than the 33× kernel speedup.
+
+The gap is explained by **Amdahl's law**.  The total execution time has two components: (a) compressible kernel compute time and (b) incompressible data-movement cost (the shim DMA must transfer 64 MB -> 32 MB in + 32 MB out — between DRAM and the NPU regardless of how fast the kernel runs).  For the scalar relu, the long kernel compute dominates and hides the DMA time behind it.  For the vectorized relu, the kernel finishes almost instantly, so the fixed DMA cost is fully exposed and dominates the total time.
+
+This is precisely why **layer fusion** (Steps 3.4.3-3.4.4) is valuable: it eliminates the intermediate DRAM round-trip entirely by keeping data on-chip between matmul and relu.
+
+</details>
+
+##### Step 3.4.3 — Kernel fusion (Task 2)
+
+Now implement `relu_fused_i16` in `mm.cc` — same logic as `relu_i16` (a separate symbol is needed for the fused design to link independently).
+
+The **given** design [`matmul_relu_fused.py`](exercises/04_layer_fusion/matmul_relu_fused.py) calls `relu_fused_i16` in-place on the C tile right after the K-loop completes, before releasing it to the DMA:
+
+```python
+# In the core function (given):
+for _ in range_(tiles_per_core):
+    elem_out = of_c.acquire(1)
+    zero(elem_out)
+    for _ in range_(K_div_k):
+        elem_in_a = of_a.acquire(1)
+        elem_in_b = of_b.acquire(1)
+        matmul(elem_in_a, elem_in_b, elem_out)
+        of_a.release(1)
+        of_b.release(1)
+    relu(elem_out, elem_out)   # ← fused relu, applied in-place
+    of_c.release(1)
+```
+
+Build and test:
+
+```bash
+make run_fused                # builds fused design, verifies D = relu(A × B)
+```
+
+> **Questions**
+>
+> 1. Why is calling `relu(elem_out, elem_out)` (same buffer as both input and output) safe here?  Under what condition would it not be safe?
+> 2. Compare the fused latency to the sequential total.  Where does the speedup come from?
+
+<details>
+<summary><strong>Solution</strong></summary>
+
+**`relu_fused_i16`** — identical body to `relu_i16`:
+```cpp
+void relu_fused_i16(const int16 *__restrict in, int16 *__restrict out) {
+    constexpr int vec_factor = 32;
+    aie::vector<int16, vec_factor> zeros = aie::zeros<int16, vec_factor>();
+    for (unsigned i = 0; i < m * n; i += vec_factor) {
+        aie::vector<int16, vec_factor> v = aie::load_v<vec_factor>(in + i);
+        aie::store_v(out + i, aie::max(v, zeros));
+    }
+}
+```
+
+**1.** It is safe because the vectorized kernel reads a full 32-element vector via `aie::load_v` before writing it back via `aie::store_v`.  The read and write never overlap within the same vector.  It would be unsafe if the kernel read and wrote overlapping but non-identical sub-regions (e.g., a sliding-window filter), because the write could corrupt data not yet read.
+
+**2.** The fused design eliminates: (a) the DRAM round-trip for the 32 MB intermediate matrix C, (b) the xclbin reload latency (~0.5 ms), and (c) the separate relu kernel launch.  The relu computation itself (a few µs per tile) is hidden behind the matmul which dominates.  Measured result: fused ~16.9 ms vs sequential (vectorized) ~18.2 ms.
+
+</details>
+
+##### Step 3.4.4 — Pipeline fusion (Task 3)
+
+Open [`matmul_relu_pipeline.py`](exercises/04_layer_fusion/matmul_relu_pipeline.py).  This template implements a **2-stage pipeline**:
+
+- **Core 0** (matmul): computes C tiles and pushes them to Core 1 via a core-to-core ObjectFifo.
+- **Core 1** (relu): reads C tiles from Core 0, applies relu, and sends D tiles to DRAM.
+
+The data movement for A and B (shim → mem tile → Core 0) and D (Core 1 → mem tile → shim) is given. Fill in the `???` sections:
+
+1. **`coreC`** — a core-to-core ObjectFifo (double-buffered) connecting Core 0 to Core 1.
+2. **`memD` / `outD`** — ObjectFifo for relu output, forwarded through mem tile with `c_dims` to un-tile.
+3. **`matmul_core_fn`** — Core 0 loop: acquire coreC → zero → K-loop (acquire A/B, matmul, release A/B) → release coreC.
+4. **`relu_core_fn`** — Core 1 loop: acquire coreC + memD → relu → release both.
+5. **`worker_mm` / `worker_relu`** — Worker instantiation.
+
+Build and test:
+
+```bash
+make run_pipeline             # builds pipeline, verifies D = relu(A × B)
+```
+
+> **Questions**
+>
+> 1. What is the advantage of the pipeline approach over the fused approach?  In what scenarios would it be more beneficial?
+> 2. How many compute tiles does the pipeline use vs. the fused design?  Is there a tradeoff?
+> 3. Compare the latencies: sequential vs. fused vs. pipeline.  Discuss the results.
+
+<details>
+<summary><strong>Solution</strong></summary>
+
+```python
+# Core-to-core ObjectFifo (double-buffered)
+coreC = ObjectFifo(c_ty, name="coreC", depth=2)
+
+# D output path: Core 1 → mem tile (un-tile) → shim
+memD = ObjectFifo(c_ty, name="memD")
+outD = memD.cons().forward(name="outD", dims_to_stream=c_dims)
+
+# Core 0: matmul producer
+def matmul_core_fn(of_a, of_b, of_c, zero, matmul):
+    for _ in range_(total_tiles):
+        elem_out = of_c.acquire(1)
+        zero(elem_out)
+        for _ in range_(K_div_k):
+            elem_in_a = of_a.acquire(1)
+            elem_in_b = of_b.acquire(1)
+            matmul(elem_in_a, elem_in_b, elem_out)
+            of_a.release(1)
+            of_b.release(1)
+        of_c.release(1)
+
+# Core 1: relu consumer
+def relu_core_fn(of_c, of_d, relu):
+    for _ in range_(total_tiles):
+        elem_c = of_c.acquire(1)
+        elem_d = of_d.acquire(1)
+        relu(elem_c, elem_d)
+        of_c.release(1)
+        of_d.release(1)
+
+worker_mm = Worker(
+    matmul_core_fn,
+    [memA.cons(), memB.cons(), coreC.prod(), zero_fn, matmul_fn],
+)
+worker_relu = Worker(
+    relu_core_fn,
+    [coreC.cons(), memD.prod(), relu_fn],
+)
+```
+
+**1.** The pipeline approach enables **temporal overlap**: while Core 0 computes matmul on tile N+1, Core 1 simultaneously applies relu on tile N.  In the fused approach, relu executes sequentially after matmul on the same core, adding to the critical path.  The pipeline is most beneficial when the relu (or more generally, the second stage) has significant compute cost — the overlap hides it entirely.
+
+**2.** The pipeline uses 2 compute tiles (one for matmul, one for relu) vs. 2 compute tiles in the fused design (both doing matmul+relu).  However, the pipeline only runs matmul on a single core (since it needs the other for relu), so it processes tiles sequentially rather than in parallel.  This is a tradeoff: the fused design has 2× matmul parallelism, while the pipeline has matmul-relu overlap.
+
+**3.** Measured results ($M=4096, K=256, N=4096$):
+
+| Design | Latency |
+|--------|---------|
+| Sequential (scalar relu) | ~70.5 ms (matmul 15.5 + reload 0.7 + scalar relu 54.3) |
+| Sequential (vectorized relu) | ~18.2 ms (matmul 15.4 + reload 0.5 + vectorized relu 2.3) |
+| Fused | ~16.9 ms |
+| Pipeline | ~30.4 ms |
+
+The fused design wins because relu is very cheap compared to matmul — the benefit of pipeline overlap cannot compensate for losing the 2-core matmul parallelism. The pipeline approach would shine when the second stage is more expensive (e.g., a complex post-processing kernel) or when more cores are available to parallelize both stages.
+
+</details>
+
+
+---
+
 - Exercise: From the matmul kernel extend it to fuse a Relu in there using max vector instrisics
 - Final exercise -> Students will have to write more code but will start from the whole array design.
 

@@ -1,16 +1,18 @@
-# matmul_dual.py
+# matmul_relu_fused.py
 #
 # ┌──────────────────────────────────────────────────────────────────────┐
-# │  GIVEN — Dual-tile parallel vectorized matrix multiplication        │
+# │  GIVEN — Dual-tile fused matmul + relu                              │
 # │                                                                     │
-# │  Two AIE cores each compute half of the output matrix C = A × B.   │
-# │  Core 0 handles tile-rows 0–31, Core 1 handles tile-rows 32–63.     │
-# │  Each core has its own A, B and C ObjectFIFOs forwarded through     │
-# │  the mem tile with DMA layout transforms (same as exercise 03).     │
+# │  Same 2-core parallel matmul as matmul_dual.py, but after the      │
+# │  K-loop each core applies relu_fused_i16 to the C tile in-place    │
+# │  before releasing it.  This eliminates the DRAM round-trip and      │
+# │  xclbin reload overhead of the sequential approach.                 │
+# │                                                                     │
+# │  The student must implement relu_fused_i16 in mm.cc (Task 2).      │
 # └──────────────────────────────────────────────────────────────────────┘
 #
 # Usage:
-#   python3 matmul_dual.py > build/matmul_dual/aie.mlir
+#   python3 matmul_relu_fused.py > build/fused/aie.mlir
 #
 # =========================================================================
 import numpy as np
@@ -23,7 +25,7 @@ from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorTiler2D
 
 
-def matmul_dual():
+def matmul_relu_fused():
     # ------------------------------------------------------------------
     # 1. Dimensions
     # ------------------------------------------------------------------
@@ -33,9 +35,9 @@ def matmul_dual():
 
     r, s, t = 4, 4, 8
 
-    M_div_m = M // m                    # 64
-    K_div_k = K // k                    # 4
-    N_div_n = N // n                    # 64
+    M_div_m = M // m
+    K_div_k = K // k
+    N_div_n = N // n
 
     n_cores = 2
     tiles_per_core = (M_div_m * N_div_n) // n_cores  # 2048
@@ -45,7 +47,7 @@ def matmul_dual():
     # ------------------------------------------------------------------
     A_ty = np.ndarray[(M * K,), np.dtype[dtype]]
     B_ty = np.ndarray[(K * N,), np.dtype[dtype]]
-    C_ty = np.ndarray[(M * N,), np.dtype[dtype]]
+    D_ty = np.ndarray[(M * N,), np.dtype[dtype]]
     a_ty = np.ndarray[(m, k), np.dtype[dtype]]
     b_ty = np.ndarray[(k, n), np.dtype[dtype]]
     c_ty = np.ndarray[(m, n), np.dtype[dtype]]
@@ -55,6 +57,7 @@ def matmul_dual():
     # ------------------------------------------------------------------
     zero_fn = Kernel("zero_i16", "mm.cc.o", [c_ty])
     matmul_fn = Kernel("matmul_i16_i16", "mm.cc.o", [a_ty, b_ty, c_ty])
+    relu_fn = Kernel("relu_fused_i16", "mm.cc.o", [c_ty, c_ty])
 
     # ------------------------------------------------------------------
     # 4. DMA layout transforms (same as exercise 03)
@@ -85,9 +88,9 @@ def matmul_dual():
     outC1 = memC1.cons().forward(name="outC1", dims_to_stream=c_dims)
 
     # ------------------------------------------------------------------
-    # 6. Core function (same for both cores)
+    # 6. Core function — matmul + fused relu
     # ------------------------------------------------------------------
-    def core_fn(of_a, of_b, of_c, zero, matmul):
+    def core_fn(of_a, of_b, of_c, zero, matmul, relu):
         for _ in range_(tiles_per_core):
             elem_out = of_c.acquire(1)
             zero(elem_out)
@@ -97,6 +100,10 @@ def matmul_dual():
                 matmul(elem_in_a, elem_in_b, elem_out)
                 of_a.release(1)
                 of_b.release(1)
+            # ── Fused relu: applied in-place on the C tile ──
+            # Both args point to the same buffer — safe because the
+            # kernel reads a full vector before writing it back.
+            relu(elem_out, elem_out)
             of_c.release(1)
 
     # ------------------------------------------------------------------
@@ -104,46 +111,44 @@ def matmul_dual():
     # ------------------------------------------------------------------
     worker0 = Worker(
         core_fn,
-        [memA0.cons(), memB0.cons(), memC0.prod(), zero_fn, matmul_fn],
+        [memA0.cons(), memB0.cons(), memC0.prod(),
+         zero_fn, matmul_fn, relu_fn],
     )
     worker1 = Worker(
         core_fn,
-        [memA1.cons(), memB1.cons(), memC1.prod(), zero_fn, matmul_fn],
+        [memA1.cons(), memB1.cons(), memC1.prod(),
+         zero_fn, matmul_fn, relu_fn],
     )
 
     # ------------------------------------------------------------------
-    # 8. Runtime sequence
+    # 8. Runtime sequence (same data movement as matmul_dual)
     # ------------------------------------------------------------------
-    # A taps: each tap covers 1 tile-row of A, repeated N_div_n times
     a_taps = TensorTiler2D.group_tiler(
         (M, K), (m, k), (1, K_div_k), pattern_repeat=N_div_n
     )
-    # B tap: all K×N tiles in column-major tile-group order
     b_tap = TensorTiler2D.group_tiler(
         (K, N), (k, n), (K_div_k, N_div_n), tile_group_col_major=True
     )[0]
-    # C taps: each tap covers 1 tile-row of C
     c_taps = TensorTiler2D.group_tiler(
         (M, N), (m, n), (1, N_div_n)
     )
 
     rt = Runtime()
-    with rt.sequence(A_ty, B_ty, C_ty) as (A, B, C):
+    with rt.sequence(A_ty, B_ty, D_ty) as (A, B, D):
         rt.start(worker0, worker1)
 
-        # Process tile-rows in pairs: (0,2), (1,3)
-        rows_per_core = M_div_m // n_cores  # 2
+        rows_per_core = M_div_m // n_cores
         for pair in range(rows_per_core):
-            tr0 = pair                       # core 0: tile-rows 0, 1
-            tr1 = pair + rows_per_core       # core 1: tile-rows 2, 3
+            tr0 = pair
+            tr1 = pair + rows_per_core
 
             tg = rt.task_group()
             rt.fill(inA0.prod(), A, tap=a_taps[tr0], task_group=tg)
             rt.fill(inA1.prod(), A, tap=a_taps[tr1], task_group=tg)
             rt.fill(inB0.prod(), B, tap=b_tap, task_group=tg)
             rt.fill(inB1.prod(), B, tap=b_tap, task_group=tg)
-            rt.drain(outC0.cons(), C, tap=c_taps[tr0], task_group=tg, wait=True)
-            rt.drain(outC1.cons(), C, tap=c_taps[tr1], task_group=tg, wait=True)
+            rt.drain(outC0.cons(), D, tap=c_taps[tr0], task_group=tg, wait=True)
+            rt.drain(outC1.cons(), D, tap=c_taps[tr1], task_group=tg, wait=True)
             rt.finish_task_group(tg)
 
     # ------------------------------------------------------------------
@@ -153,4 +158,4 @@ def matmul_dual():
 
 
 if __name__ == "__main__":
-    print(matmul_dual())
+    print(matmul_relu_fused())

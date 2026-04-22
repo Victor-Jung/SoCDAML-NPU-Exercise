@@ -21,7 +21,7 @@ import aie.iron as iron
 from aie.utils import DefaultNPURuntime
 from aie.utils.npukernel import NPUKernel
 
-M, K, N = 256, 256, 256
+M, K, N = 4096, 256, 4096
 WARMUP_ITERS = 5
 BENCH_ITERS = 20
 

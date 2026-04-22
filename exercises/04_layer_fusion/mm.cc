@@ -3,12 +3,12 @@
 // Kernels for the layer-fusion exercise (npu2, int16).
 //
 // Exports:
-//   matmul_i16_i16       — vectorized matmul (tiled data layout)
-//   zero_i16             — vectorized zero
-//   relu_i16             — vectorized ReLU  (out[i] = max(in[i], 0))
-//   relu_scalar_i16      — scalar ReLU      (reference)
-//   relu_fused_scalar_i16 — TODO (Phase 2): student implements scalar ReLU
-//   relu_fused_i16        — TODO (Phase 2): student implements vectorized ReLU
+//   matmul_i16_i16   — vectorized matmul  (tiled data layout)  [given]
+//   zero_i16         — vectorized zero                         [given]
+//   relu_scalar_i16  — TODO (Task 1): student implements scalar ReLU
+//   relu_i16         — TODO (Task 1): student implements vectorized ReLU
+//   relu_fused_i16   — TODO (Task 2): student implements vectorized ReLU
+//                      (same logic as relu_i16, separate symbol for fusion)
 //
 // Tile dimensions: m=64, k=64, n=64
 // Vectorized intrinsic: aie::mmul<r=4, s=4, t=8>  (npu2 int16)
@@ -107,59 +107,49 @@ void zero_i16(int16 *__restrict c) {
   }
 }
 
-// ─── Vectorized ReLU ────────────────────────────────────────────────────────
-//
-// out[i] = max(in[i], 0)  for all i in [0, m*n).
-// Uses 32-wide int16 vectors for efficient element-wise max.
-//
-void relu_i16(const int16 *__restrict in, int16 *__restrict out) {
-  event0();
-  constexpr int vec_factor = 32;
-  aie::vector<int16, vec_factor> zeros = aie::zeros<int16, vec_factor>();
-  for (unsigned i = 0; i < m * n; i += vec_factor) {
-    aie::vector<int16, vec_factor> v = aie::load_v<vec_factor>(in + i);
-    aie::store_v(out + i, aie::max(v, zeros));
-  }
-  event1();
-}
-
-// ─── Scalar ReLU (reference) ────────────────────────────────────────────────
-void relu_scalar_i16(const int16 *__restrict in, int16 *__restrict out) {
-  event0();
-  for (unsigned i = 0; i < m * n; i++) {
-    out[i] = (in[i] < 0) ? (int16)0 : in[i];
-  }
-  event1();
-}
-
-// ─── TODO (Phase 2): Student implements scalar ReLU ─────────────────────────
+// ─── TODO (Task 1): Student implements scalar ReLU ──────────────────────────
 //
 // Implement out[i] = max(in[i], 0) for all i in [0, m*n)
 // using a simple scalar loop.
 //
-void relu_fused_scalar_i16(const int16 *__restrict in,
-                           int16 *__restrict out) {
+void relu_scalar_i16(const int16 *__restrict in, int16 *__restrict out) {
+  event0();
   // ┌──────────────────────────────────────────────────────┐
   // │  YOUR CODE HERE                                      │
-  // │  Hint: loop over m*n elements, compare each to 0.    │
   // └──────────────────────────────────────────────────────┘
+  event1();
 }
 
-// ─── TODO (Phase 2): Student implements vectorized ReLU ─────────────────────
+// ─── TODO (Task 1): Student implements vectorized ReLU ──────────────────────
 //
 // Implement out[i] = max(in[i], 0) for all i in [0, m*n)
 // using AIE vector intrinsics for efficient execution.
 //
 // Hint: look at how zero_i16 uses aie::zeros and aie::store_v.
 //       The aie::max() intrinsic computes the element-wise maximum
-//       of two vectors.
+//       of two vectors.  Use 32-wide int16 vectors.
+//
+void relu_i16(const int16 *__restrict in, int16 *__restrict out) {
+  event0();
+  // ┌──────────────────────────────────────────────────────┐
+  // │  YOUR CODE HERE                                      │
+  // │  Hint: use aie::load_v, aie::max, aie::store_v      │
+  // │  with a vector of zeros.                             │
+  // └──────────────────────────────────────────────────────┘
+  event1();
+}
+
+// ─── TODO (Task 2): Student implements vectorized ReLU for fusion ───────────
+//
+// Same logic as relu_i16 above — a separate symbol so the fused design
+// can link it independently.
+//
+// Hint: if you already wrote relu_i16, the body is identical.
 //
 void relu_fused_i16(const int16 *__restrict in,
                     int16 *__restrict out) {
   // ┌──────────────────────────────────────────────────────┐
   // │  YOUR CODE HERE                                      │
-  // │  Hint: use aie::load_v, aie::max, aie::store_v      │
-  // │  with a vector of zeros.                             │
   // └──────────────────────────────────────────────────────┘
 }
 
