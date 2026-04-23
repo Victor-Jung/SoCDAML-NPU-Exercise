@@ -870,6 +870,7 @@ make run_pipeline             # builds pipeline, verifies D = relu(A × B)
 > 1. What is the advantage of the pipeline approach over the fused approach?  In what scenarios would it be more beneficial?
 > 2. How many compute tiles does the pipeline use vs. the fused design?  Is there a tradeoff?
 > 3. Compare the latencies: sequential vs. fused vs. pipeline.  Discuss the results.
+> 4. Propose a scenario where the pipeline approach is mandatory to prevent the round trip of intermediate tensors to DRAM.
 
 <details>
 <summary><strong>Solution</strong></summary>
@@ -927,14 +928,8 @@ worker_relu = Worker(
 | Fused | ~16.9 ms |
 | Pipeline | ~30.4 ms |
 
-The fused design wins because relu is very cheap compared to matmul — the benefit of pipeline overlap cannot compensate for losing the 2-core matmul parallelism. The pipeline approach would shine when the second stage is more expensive (e.g., a complex post-processing kernel) or when more cores are available to parallelize both stages.
+The fused design wins because relu is very cheap compared to matmul. The benefit of pipeline overlap cannot compensate for losing the 2-core matmul parallelism. The pipeline approach would shine when the second stage is more expensive (e.g., a complex post-processing kernel) or when more cores are available to parallelize both stages.
+
+**4.** A chain of layers such as `Matmul + Relu -> Matmul + Relu` would require to use the pipelining approach to perform layer fusion. Running two Matmul on one AIE core would require storing 4 tensors in L1 (8 tensors with double-buffering). This would reduce drastically the tile size and the overall vector unit utilization.
 
 </details>
-
-
----
-
-- Exercise: From the matmul kernel extend it to fuse a Relu in there using max vector instrisics
-- Final exercise -> Students will have to write more code but will start from the whole array design.
-
-# Acknowledgements
