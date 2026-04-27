@@ -8,14 +8,29 @@ Welcome to the 6th exercise of the SoCDAMl course 2026. In this exercise, we wil
 
 # Part I: Introduction to NPUs
 
-
 ## Primer: What is an NPU?
 
-- Explain that it's a wide range of HW 
-- We consider only multi-tile system with software-managed caches and indepent PEs (each PE can run it's own code) as NPUs
-- Explain why the software-managed aspect of it is important, especially for DNNs
-- Explain how the software-managed and multi PE makes it very hard to program, hence this exercise
+The term Neural Processing Unit (NPU) is used broadly in industry to describe any accelerator optimized for neural-network inference. In practice this covers a wide range of hardware: from simple fixed-function MAC arrays (e.g., Google TPU v1) to highly flexible multi-core architectures with individually-programmable processing elements (e.g., AMD XDNA, Tenstorrent's Tensix). NPUs exhibit the following properties:
 
+- Multi-PE structure: the accelerator contains multiple processing elements ("tiles") that can each execute their own independent instruction stream.
+- Software-managed memories: the on-chip memories are explicitly-addressed scratchpads, not hardware-managed caches. The programmer (or compiler) decides what data resides where and when it moves.
+- Explicit data movement: transfers between levels of the memory hierarchy are initiated by DMA engines that the software must program.
+
+### Why Software-Managed Caches
+
+Neural-network inference has highly predictable data access patterns: layer shapes, tiling factors, and reuse distances are all known at compile time. Hardware caches are designed for unpredictable workloads, they consume area and power and provide no benefit when access patterns are fully deterministic. By replacing caches with software-managed scratchpads, NPU designers can:
+
+- Dedicate more silicon area to compute (vector/matrix units) and on-chip SRAM.
+- Enable explicit double/triple buffering where the programmer overlaps DMA transfers with computation to boost ALU utilization.
+
+The cost is programming complexity: the developer (or compiler) must explicitly tile the data, orchestrate DMA transfers, and synchronize producers and consumers. When each tile runs its own program, the programmer must make several decisions:
+
+- **Spatial mapping**: Which tile computes which portion of the output?
+- **Data distribution**: How is input data routed to the tiles that need it? Is it broadcast, multicast, or unicast?
+- **Synchronization**: When can a tile start consuming data produced by another tile? What buffering depth is needed to minimize stalls?
+- **Load balancing**: How to ensure all tiles finish at roughly the same time?
+
+These decisions interact: changing the spatial mapping affects data routing, which affects buffer sizes, which affects whether the design fits in the available scratchpad memory. This is the fundamental reason NPU programming is considered difficult — and why high-level toolchains (like MLIR-AIE / IRON, introduced in Part III) are essential for productivity.
 
 ## Primer: Softhier NPU Architecture
 
@@ -46,18 +61,67 @@ On the XDNA2 variant there are 8 columns and 6 rows (from bottom to top). Each c
 
 **AIE cores:** VLIW processor, 512-bit vector unit (32 int16 MACs/cycle), matrix unit (4x4x8 outer product), 64KB L1 scratchpad, 3-D capable DMA, hardware locks.
 
-**Mem Tiles:** 512KB scratchpad, DMA with 4-D addressing and on-the-fly layout transforms. No compute - pure buffering/reshaping.
+**Mem Tiles:** 512KB scratchpad, DMA with 4-D addressing and on-the-fly layout transforms.
 
-**Shim Tiles:** 2 in + 2 out DMA channels to DRAM, receives instruction sequence (insts.bin), boundary between NPU and host.
+**Shim Tiles:** 2 in + 2 out DMA channels to DRAM, boundary between NPU and host.
 
-### Primer: Multi-Level Intermediate Representation (MLIR)
+## Primer: Multi-Level Intermediate Representation (MLIR)
 
-- Explain what MLIR is originally
-- Explain the concept of dialects as IR and reusability (show examples)
-- Detail the verification infrastructure and what you get from the toolkit to get started
-- List famous MLIR-based projects and give pointers to further reading
-- [MLIR original paper](https://arxiv.org/pdf/2002.11054)
+MLIR is a compiler infrastructure developed at Google and donated to the LLVM project in 2019. Unlike traditional compilers that define a single, monolithic intermediate representation (e.g., LLVM IR), MLIR provides a **framework for defining many IRs**, called *dialects*, that coexist in the same program and can be progressively lowered toward hardware. The original motivation was to unify the fragmented landscape of ML compiler IRs (TensorFlow's HLO, XLA, TFLite, etc.) under one extensible system ([Lattner et al., 2020](https://arxiv.org/pdf/2002.11054)).
 
+### Dialects: Modular, Composable IRs
+
+A **dialect** is a self-contained namespace of operations, types, and attributes. Each dialect models a specific level of abstraction. For example:
+
+- `linalg` — named linear-algebra operations (matmul, conv, ...) with semantics attached.
+- `arith` — scalar arithmetic (add, multiply, compare, ...).
+- `memref` — memory buffers with rank, shape, and layout.
+- `scf` — structured control flow (for loops, if/else).
+- `vector` — fixed-length vector operations.
+- `func` — function definitions and calls.
+- `llvm` — 1:1 mapping to LLVM IR, used as the final lowering target.
+
+Different dialects **mix freely** within a single IR module. A compilation pipeline progressively *lowers* higher-level ops into lower-level ones:
+
+```mlir
+// High-level: linalg dialect (what to compute)
+%C = linalg.matmul ins(%A, %B : memref<64x64xi16>, memref<64x64xi16>)
+                   outs(%C : memref<64x64xi16>) -> memref<64x64xi16>
+
+// After lowering: scf + arith dialects (how to compute)
+scf.for %i = %c0 to %c64 step %c1 {
+  scf.for %j = %c0 to %c64 step %c1 {
+    scf.for %k = %c0 to %c64 step %c1 {
+      %a = memref.load %A[%i, %k] : memref<64x64xi16>
+      %b = memref.load %B[%k, %j] : memref<64x64xi16>
+      %c = memref.load %C[%i, %j] : memref<64x64xi16>
+      %prod = arith.muli %a, %b : i16
+      %sum  = arith.addi %c, %prod : i16
+      memref.store %sum, %C[%i, %j] : memref<64x64xi16>
+    }
+  }
+}
+```
+
+This progressive lowering means each transformation is simpler and local, it only needs to understand the source and target dialect, not the entire stack. New hardware targets add new dialects without modifying existing ones.
+
+### Verification Infrastructure
+
+Every MLIR operation carries a verifier, a function that checks structural invariants (correct number of operands, matching types, legal attributes). Verification runs automatically after every pass, catching bugs immediately rather than at code generation. The command-line tool `mlir-opt` loads an `.mlir` file, applies a pipeline of transformation passes, and emits the result. Combined with `FileCheck` (LLVM's pattern-matching test tool), this enables a the following test-driven workflow:
+
+1. Write the input IR and expected output as a `.mlir` test file.
+2. Run `mlir-opt --pass-pipeline="..." input.mlir | FileCheck input.mlir`.
+3. The test passes if the output matches the `CHECK` patterns.
+
+This infrastructure is one of MLIR's main advantages: building a new compiler dialect gives you type checking, op verification, serialization, pretty-printing, and a testing framework essentially for free. For your own general culture you can find below a list of some notable MLIR-based projects.
+
+| Project | Domain | Description |
+|---------|--------|-------------|
+| **MLIR-AIE** | NPU compilation | AMD compiler for XDNA NPUs: defines `aie`, `aiex`, and `aievec` dialects. Used in Part III of this exercise. |
+| **Triton** | GPU compilation | OpenAI's language and compiler for GPU kernels: uses MLIR internally for optimization and lowering to PTX/AMDGPU. |
+| **IREE** | ML inference | Google's end-to-end compiler from ML frameworks to CPU/GPU/NPU. |
+| **Torch-MLIR** | Framework bridge | Lowers PyTorch models (`torch` dialect) into MLIR for downstream compilers like IREE. |
+| **CIRCT** | Hardware design | Circuit IR Compilers and Tools, MLIR dialects for RTL, FSMs, and hardware generators. |
 
 # Part II: Bare-Metal C Programming of the SoftHier NPU
 
