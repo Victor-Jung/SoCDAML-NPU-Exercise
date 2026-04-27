@@ -3,7 +3,7 @@
 ---
 # SoCDAML 2026 Exercise 6 - NPU Programming
 
-Welcome to the 6th exercise of the SoCDAMl course 2026. In this exercise, we will teach you the fundamentals to program NPUs. This exercise will be divided in three parts, first part contains context and pointers at paper/blogpost to help you sucessfully do this exercise. Part two is about bare-metal C programming of an academic NPU platform named [SoftHier](https://efcl.ethz.ch/research0/Currentprojects.html). In part three we switch to the commercial XDNA2 NPU from AMD, study the MLIR programming stack and how to develop applications.
+Welcome to the 6th exercise of the SoCDAML course 2026. In this exercise, we will teach you the fundamentals of programming NPUs. This exercise is divided into three parts: the first part contains context and pointers to papers and blog posts to help you successfully complete this exercise. Part Two is about bare-metal C programming of an academic NPU platform named [SoftHier](https://efcl.ethz.ch/research0/Currentprojects.html). In Part Three, we switch to the commercial XDNA2 NPU from AMD, study the [MLIR-AIE](https://github.com/Xilinx/mlir-aie) programming stack, and learn how to develop applications.
 
 
 # Part I: Introduction to NPUs
@@ -107,13 +107,13 @@ This progressive lowering means each transformation is simpler and local, it onl
 
 ### Verification Infrastructure
 
-Every MLIR operation carries a verifier, a function that checks structural invariants (correct number of operands, matching types, legal attributes). Verification runs automatically after every pass, catching bugs immediately rather than at code generation. The command-line tool `mlir-opt` loads an `.mlir` file, applies a pipeline of transformation passes, and emits the result. Combined with `FileCheck` (LLVM's pattern-matching test tool), this enables a the following test-driven workflow:
+Every MLIR operation carries a verifier, a function that checks structural invariants (correct number of operands, matching types, legal attributes). Verification runs automatically after every pass, catching bugs immediately rather than at code generation. The command-line tool `mlir-opt` loads an `.mlir` file, applies a pipeline of transformation passes, and emits the result. Combined with `FileCheck` (LLVM's pattern-matching test tool), this enables the following test-driven workflow:
 
 1. Write the input IR and expected output as a `.mlir` test file.
 2. Run `mlir-opt --pass-pipeline="..." input.mlir | FileCheck input.mlir`.
 3. The test passes if the output matches the `CHECK` patterns.
 
-This infrastructure is one of MLIR's main advantages: building a new compiler dialect gives you type checking, op verification, serialization, pretty-printing, and a testing framework essentially for free. For your own general culture you can find below a list of some notable MLIR-based projects.
+This infrastructure is one of MLIR's main advantages: building a new compiler dialect gives you type checking, op verification, serialization, pretty-printing, and a testing framework essentially for free. For your own general culture, you can find below a list of some notable MLIR-based projects.
 
 | Project | Domain | Description |
 |---------|--------|-------------|
@@ -161,7 +161,7 @@ This infrastructure is one of MLIR's main advantages: building a new compiler di
 
 - Show a code snippet of a double buffer transfer between two PEs in bare-metal C
 - Compare it to the MLIR code for object fifo
-- Bare-metal C is not scaling well expecially when considering that every PE can run independent code
+- Bare-metal C does not scale well, especially when considering that every PE can run independent code
 - We need to play at a higher level of abstraction, to not have to care about boilerplate and over verbose code
 - Building a MLIR-based compiler to lower a high level dialect is the way to go
 - Still you don't want to offload important design decision to the compiler yet, so what can you simplify?
@@ -176,9 +176,9 @@ This infrastructure is one of MLIR's main advantages: building a new compiler di
 <details>
 <summary><strong>Solution</strong></summary>
 
-The kernels could be written either in MLIR or in C/C++. Writting kernels in C/C++ has two advantages. First, it using the vector unit in a very explicit way with the intrinsics. Second, performance optimization is easy in C/C++ as the language is pretty close to the hardware. Compilation to LLVM IR can be done with Clang.
+The kernels could be written either in MLIR or in C/C++. Writing kernels in C/C++ has two advantages. First, it allows using the vector unit in a very explicit way with intrinsics. Second, performance optimization is easy in C/C++ as the language is pretty close to the hardware. Compilation to LLVM IR can be done with Clang.
 
-It is also possible to write the kernels directly in MLIR but then you need the compiler to perform auto-vectorization. Offloading this task to the compiler is possible but requires additional infrastructure. Compilation to LLVM IR can be done with the a regular MLIR compiler.
+It is also possible to write the kernels directly in MLIR, but then you need the compiler to perform auto-vectorization. Offloading this task to the compiler is possible but requires additional infrastructure. Compilation to LLVM IR can be done with a regular MLIR compiler.
 
 </details>
 
@@ -214,12 +214,12 @@ All examples in `exercises/` follow this flow via `make build_*` / `make run_*`.
 
 ## Data Movement Primitives
 
-In MLIR-AIE, all tile-to-tile and host-to-tile data movement is expressed through **ObjectFIFOs**.  An ObjectFIFO is a synchronized circular buffer connecting a *producer* endpoint to one or more *consumer* endpoints.  Each endpoint acquires a buffer slot, works on the data, and releases it — the runtime handles the underlying DMA programming and lock synchronization. To learn more about the AIE programming model check out [this paper](https://arxiv.org/pdf/2504.18430).
+In MLIR-AIE, all tile-to-tile and host-to-tile data movement is expressed through **ObjectFIFOs**.  An ObjectFIFO is a synchronized circular buffer connecting a *producer* endpoint to one or more *consumer* endpoints.  Each endpoint acquires a buffer slot, works on the data, and releases it — the runtime handles the underlying DMA programming and lock synchronization. To learn more about the AIE programming model, check out [this paper](https://arxiv.org/pdf/2504.18430).
 
 
 ### ObjectFIFO in IRON Python
 
-The snippet of code below shows how an ObjectFIFO can be instanciated in Pyhton using the IRON library 
+The snippet of code below shows how an ObjectFIFO can be instantiated in Python using the IRON library.
 
 ```python
 from aie.iron import ObjectFifo
@@ -250,7 +250,7 @@ def core_fn(of_in, of_out, passThroughLine):
 
 <details>
 <summary><strong>Solution</strong></summary>
-With a single slot, Producer must release before consumer can acquire. Transfer and compute are sequential. With two slots, while the core processes slot A, the DMA fills slot B. Transfer and compute overlap. By using more than 2 slots you can create a deeper pipeline which is useful when transfer latency >> compute.
+With a single slot, the producer must release before the consumer can acquire. Transfer and compute are sequential. With two slots, while the core processes slot A, the DMA fills slot B. Transfer and compute overlap. By using more than 2 slots you can create a deeper pipeline which is useful when transfer latency >> compute.
 
 Using more slots comes at the price of increasing the memory footprint of the buffers to materialize on the consumer and producer end. As the L1 memory of the AIE core is limited to 64KB, you can quickly run out of memory. To mitigate that you can reduce the size of your tiles, however, by doing so you may end up starving your core during kernel execution.
 </details>
@@ -300,7 +300,7 @@ Open [`add_one_single.py`](exercises/01_single_double_buffer/add_one_single.py) 
 3. **Kernel** — `addOneLine` adds 1 to each element in a chunk (2048 elements).
 4. **Worker** — A single AIE core iterates 8 times: acquire → add one → release.
 5. **Runtime** — `rt.fill()` streams host data in, `rt.drain()` streams results out.  Tracing is enabled.
-6. **Compile** — `Program(dev, rt).resolve_program(SequentialPlacer())` places the design on the NPU2 emits MLIR.
+6. **Compile** — `Program(dev, rt).resolve_program(SequentialPlacer())` places the design on the NPU and emits MLIR.
 
 #### Step 3.1.2 — Build, run, and trace the single-buffer design
 
@@ -329,7 +329,7 @@ make trace_double        # generates trace_double.json
 
 Open both `trace_single.json` and `trace_double.json` in [Perfetto](https://ui.perfetto.dev). In the trace you can observe the following fields :
 - **`LOCK_STALL`:** This event happens when the core waits for a DMA transfer.
-- **`PORT_RUNNING_X`:** This event is triggred when a DMA transfer is happening on one of the port.
+- **`PORT_RUNNING_X`:** This event is triggered when a DMA transfer is happening on one of the ports.
 - **`INSTR_EVENT_0`:** Emitted by the `event0();` call, usually called at the beginning of the kernels.
 - **`INSTR_EVENT_1`:** Emitted by the `event1();` call, usually called at the end of the kernels.
 - **`INSTR_VECTOR`:** Emitted every time the vector unit is used, can be useful to see how well the kernel is using the vector unit.
@@ -353,7 +353,7 @@ of_out = ObjectFifo(chunk_type, name="out", depth=2)
 
 With `depth=2`, two buffer slots exist per FIFO. While the core processes chunk N from slot A, the DMA can already fill chunk N+1 into slot B (and similarly drain a completed chunk from the other slot on the output side). The hardware locks coordinate access: a slot can only be acquired by the consumer once the producer has released it. With two slots this no longer forces serialization.
 
-**2.** `LOCK_STALL` dominatesf. With `depth=1` there is only one bufer slot per ObjectFIFO. After the core finishes processing a chunk and releases the output slot, it immediately tries to acquire the next input slot — but the DMA has not yet finished filling it because it could not start until the previous slot was released. The core therefore stalls on the lock, waiting for the DMA to complete the transfer.
+**2.** `LOCK_STALL` dominates. With `depth=1` there is only one buffer slot per ObjectFIFO. After the core finishes processing a chunk and releases the output slot, it immediately tries to acquire the next input slot — but the DMA has not yet finished filling it because it could not start until the previous slot was released. The core therefore stalls on the lock, waiting for the DMA to complete the transfer.
 
 **3.** In the double-buffer trace the `PORT_RUNNING_0` (input DMA) and `PORT_RUNNING_1` (output DMA) events overlap with the `INSTR_EVENT_0`/`INSTR_EVENT_1` kernel execution spans. While the core computes on chunk N, the input DMA is already fetching chunk N+1 and the output DMA is draining chunk N-1. In the single-buffer trace these DMA activities appear strictly between kernel invocations, never overlapping.
 
@@ -374,14 +374,14 @@ Observe again the `add_one_single.py` file. It's never specified which AIE core 
 <details>
 <summary><strong>Solution</strong></summary>
 
-**1.**  The AIE core located at the coordinates (0, 2) does the kernel computation and the Shim tile in (0, 0) does the DMA transfer between DRAM and L1. Below are the MLIR snippet giving us this information:
+**1.**  The AIE core located at the coordinates (0, 2) does the kernel computation and the Shim tile in (0, 0) does the DMA transfer between DRAM and L1. Below is the MLIR snippet giving us this information:
 
 ```
 %tile_0_2 = aie.tile(0, 2)
 %shim_noc_tile_0_0 = aie.tile(0, 0)
 ```
 
-**2.** The `SequentialPlacer()` is the class responsible of placing the workload on the NPU array. This placer is very basic and will look for the first suitable tile available and place the workload. You can also manually place the workload from IRON in Python with the `placement` keyword argument of the `Worker` class for AIE cores or `rt.fill` for Shim tiles.
+**2.** The `SequentialPlacer()` is the class responsible for placing the workload on the NPU array. This placer is very basic and will look for the first suitable tile available and place the workload. You can also manually place the workload from IRON in Python with the `placement` keyword argument of the `Worker` class for AIE cores or `rt.fill` for Shim tiles.
 
 </details>
 
@@ -528,22 +528,15 @@ of_outs = of_out.prod().join(
 
 **3.** The generated MLIR contains 4 `aie.core` ops on tiles (0,2), (0,3), (0,4), and (0,5).  There are 2 unique `memref` types in the kernel declarations: `memref<1024xi32>` (for the 8-row cores) and `memref<3072xi32>` (for the 24-row cores), matching the two kernel entry points `addOneSmall` and `addOneLarge`.
 
-**4.** For this small data size there is no improvement because the DMA transfer overhead through the Mem tile adds latency which compensate the parallelization benefit. The compute itself (add-one) is very fast, so the bottleneck is data movement rather than computation. For larger matrices or more compute-intensive kernels, the parallelism would provide more significant speedup.
+**4.** For this small data size there is no improvement because the DMA transfer overhead through the Mem tile adds latency that compensates for the parallelization benefit. The compute itself (add-one) is very fast, so the bottleneck is data movement rather than computation. For larger matrices or more compute-intensive kernels, the parallelism would provide more significant speedup.
 
 </details>
-
-*Further data movement exercises:*
-
-- Layout transformation: Explain the DMA transform representation with sizes and strides. Ask them to perform a reshape operation, show them two way of doing it (with DMA and with AIE core) and compare performances.
-- Exercise: Chaining passthrough and observe performances difference
-
----
 
 ### DMA Layout Transformations
 
 The AIE vector unit (`aie::mmul`) multiplies small **sub-tiles** of a matrix — for example, a 4×4 block of A with a 4×8 block of B to produce a 4×8 block of C.  The host stores matrices in **row-major** order, but the vectorized kernel expects data arranged as a sequence of sub-tiles.
 
-Re-arranging the data in on the host CPU or in the AIE core is expensive. Instead, the **DMA** in each tile can re-order data on the fly as it transfers between memory and the AXI stream. This is called a **DMA layout transformation**.
+Re-arranging the data on the host CPU or in the AIE core is expensive. Instead, the **DMA** in each tile can re-order data on the fly as it transfers between memory and the AXI stream. This is called a **DMA layout transformation**.
 
 #### Data Layout Transformation Formulation
 
@@ -562,7 +555,7 @@ for i0 in range(size_0):       # outermost
         buffer[i0*stride_0 + i1*stride_1 + i2*stride_2 + i3*stride_3]
 ```
 
-Not all DMAs are made equal, the number of dimensions supported depends on where they are in the NPU:
+Not all DMAs are created equal; the number of dimensions supported depends on where they are in the NPU:
 
 - **Compute / Shim tiles** support up to **3 dimensions**.
 - **Mem tiles** support up to **4 dimensions** — which is why the `forward()` through a Mem tile is used for matrix tiling.
@@ -630,7 +623,7 @@ In this task you will complete a **vectorized** 128×128 `int16` matrix multipli
 | `matmul_scalar.py` | **Given** — scalar matmul with no layout transformation. |
 | `matmul_vectorized.py` | **Template** — fill in the three `dims_to_stream` transforms. |
 | `mm.cc` | C++ kernels: scalar + vectorized matmul and zero. |
-| `test.py` | Testbench for functional corectness and latency measurement. |
+| `test.py` | Testbench for functional correctness and latency measurement. |
 | `Makefile` | Available targets: `build_scalar`, `build_vectorized`, `run_scalar`, `run_vectorized`. |
 | `solutions/` | Reference solution (look only after attempting!). |
 
@@ -815,7 +808,7 @@ Both targets also collect a hardware **trace** of the relu execution.  The relu 
 
 > **Questions**
 >
-> 1. Which AIE instrinsics can be used to vectorize ReLU? You can search in the [AIE API overview](https://docs.amd.com/r/en-US/ug1079-ai-engine-kernel-coding/Introduction-to-Scalar-and-Vector-Programming?tocId=PoB6whEdgn2TBAwBXuXYDw) or [documentation](https://xilinx.github.io/aie_api/index.html).
+> 1. Which AIE intrinsics can be used to vectorize ReLU? You can search in the [AIE API overview](https://docs.amd.com/r/en-US/ug1079-ai-engine-kernel-coding/Introduction-to-Scalar-and-Vector-Programming?tocId=PoB6whEdgn2TBAwBXuXYDw) or [documentation](https://xilinx.github.io/aie_api/index.html).
 > 2. How many elements can the intrinsic process at once?  How does this compare to the scalar loop?
 > 3. Look at the sequential test output.  What fraction of the total time is spent on the xclbin reload?  Why is this cost unavoidable in the sequential approach?
 > 4. Open both traces in Perfetto and look at the trace summary.  What is the per-tile kernel execution time (between `event0` and `event1`) for the scalar relu vs. the vectorized relu?  What is the **kernel-level speedup ratio**?
@@ -1019,6 +1012,6 @@ worker_relu = Worker(
 
 The fused design wins because relu is very cheap compared to matmul. The benefit of pipeline overlap cannot compensate for losing the 2-core matmul parallelism. The pipeline approach would shine when the second stage is more expensive (e.g., a complex post-processing kernel) or when more cores are available to parallelize both stages.
 
-**4.** A chain of layers such as `Matmul + Relu -> Matmul + Relu` would require to use the pipelining approach to perform layer fusion. Running two Matmul on one AIE core would require storing 4 tensors in L1 (8 tensors with double-buffering). This would reduce drastically the tile size and the overall vector unit utilization.
+**4.** A chain of layers such as `Matmul + Relu -> Matmul + Relu` would require using the pipelining approach to perform layer fusion. Running two Matmul on one AIE core would require storing 4 tensors in L1 (8 tensors with double-buffering). This would reduce drastically the tile size and the overall vector unit utilization.
 
 </details>
