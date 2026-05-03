@@ -14,6 +14,7 @@ source .socdaml-venv/bin/activate
 pip install -r requirements.txt
 export MLIR_AIE_DIR=/notebooks/mlir-aie/
 export PYTHONPATH=/opt/xilinx/xrt/python/
+export XRT_DIR=/opt/xilinx/xrt
 
 echo ""
 echo "========================================="
