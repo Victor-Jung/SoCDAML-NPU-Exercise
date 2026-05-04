@@ -145,7 +145,7 @@ To view the generated `.trace` file, open the following URL in your browser:
 - Intra-cluster synchronization vs. global cluster synchronization
   - Question: Why are both types of barriers necessary? -->
 
-**Exercise II-A.1:**
+#### Exercise II-A.1:
 Let's start with data movement. The following simple code for SoftHier allocates a buffer in Cluster 0 L1 memory, and Cluster 0 uses DMA to load data from HBM to the L1 buffer. Have a try in `exercise/PartII/A.1`
 ```
 #include "flex_runtime.h"
@@ -283,7 +283,7 @@ if(cluster_id == 0 && core_id == 0) { // Only core 0 in cluster 0 will print the
 ```
 Here, Core 0, instead of Core 1, prints the data in the allocated L1 buffer.
 
-**Question:** Why do we need a `flex_global_barrier_xy()` here?
+❓**Question: Why do we need a `flex_global_barrier_xy()` here?**
 
 
 
@@ -292,7 +292,7 @@ Here, Core 0, instead of Core 1, prints the data in the allocated L1 buffer.
 
 
 
-**Exercise II-A.2:**
+#### Exercise II-A.2:
 In the following code, we declare a matrix `B` in South HBM. Complete the code below to use DMA to copy `A` from West HBM → L1 buffer → `B` in South HBM.
 
 ```
@@ -370,7 +370,7 @@ int main()
 }
 ```
 
-**Exercise II-A.3:**
+#### Exercise II-A.3:
 Core 0 is attached to the RedMule matrix engine. Use `#include "flex_redmule.h"` for RedMule-related APIs. The key functions are:
 ```c
 void flex_redmule_config(uint16_t m_size, uint16_t n_size, uint16_t k_size)
@@ -398,12 +398,7 @@ typedef enum {
 
 Finally, use `flex_redmule_wait()` to wait for RedMule to complete the issued matrix multiplication job.
 
-**Question:** Here, we have three matrices, `A`, `B`, and `C`, in HBM, and we want to:
-
-1. load them into L1, and
-2. compute `C += A * B`.
-
-If the code looks like the following, will we get the correct result? Did you observe any bugs? Why? Try it in `exercise/PartII/A.3`.
+❓**Question: Here, we have three matrices, `A`, `B`, and `C`, in HBM, and we want to: 1. load them into L1, and 2. compute `C += A * B`. If the code looks like the following, will we get the correct result? Did you observe any bugs? Why? Try it in `exercise/PartII/A.3`.**
 
 
 ```
@@ -511,7 +506,7 @@ int main()
 ```
 In SoftHier, we have the `flex_intra_cluster_sync()` function to synchronize cores within their cluster. Will this help solve the problem above? Where would you put it? After that, can the simulation pass and produce the correct result?
 
-**Question:** Why are both `flex_global_barrier_xy()` and `flex_intra_cluster_sync()` essential for SoftHier?
+❓**Question: Why are both `flex_global_barrier_xy()` and `flex_intra_cluster_sync()` essential for SoftHier?**
 
 
 
@@ -539,7 +534,7 @@ By carefully scheduling the movement and computation of these tiles, we can effe
 
 A typical tiled GEMM algorithm is depict below
 
-**Question:** Normally, matrices in HBM are stored in row-major layout, if we want to load a tile from the matrix, can we still use `flex_dma_async_1d`? is it effecient?
+❓**Question: Normally, matrices in HBM are stored in row-major layout, if we want to load a tile from the matrix, can we still use `flex_dma_async_1d`? is it effecient?**
 
 
 ### C. Large GEMM on All Clusters
