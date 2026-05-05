@@ -133,7 +133,7 @@ This infrastructure is one of MLIR's main advantages: building a new compiler di
 
 All materials are located in the `exercise/PartII/` folder. For each individual exercise, navigate to its corresponding subfolder. Use `make run` to execute the SoftHier simulation with the provided code. To generate a trace file, run `make trace`.
 
-To view the generated `.trace` file, open the following URL in your browser:
+To view the generated `trace.pfto` file, open the following URL in your browser:
 👉 [Perfetto UI](https://ui.perfetto.dev/)
 
 In this exercise, the architectural parameters of the SoftHier system are fixed as shown below. The system consists of a 4×4 cluster grid, with each cluster containing two cores: core 0 is attached to the RedMule matrix engine, while core 1 controls DMA for data movement.
