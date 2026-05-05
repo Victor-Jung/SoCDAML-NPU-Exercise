@@ -140,7 +140,7 @@ In this exercise, the architectural parameters of the SoftHier system are fixed 
 
 The L1 memory is divided into two sections: `.l1_share` for user-defined variables and `.l1_heap` for dynamic L1 buffer allocation. There are two HBM stacks on the west and south sides of the SoftHier chip, annotated as `.hbm_west` and `.hbm_south`.
 
-
+<img src="imgs/softhier_config.png">
 
 ### A. Familiarization with SoftHier
 
@@ -377,6 +377,8 @@ void flex_redmule_config(uint16_t m_size, uint16_t n_size, uint16_t k_size)
 
 This configures the matrix multiplication dimensions. The `m`, `n`, and `k` annotations are shown in the following figure.
 
+<img src="imgs/RedMule_annotate.png">
+
 ```c
 void flex_redmule_trigger(uint32_t x_addr, uint32_t w_addr, uint32_t y_addr, redmule_compute_format_t format)
 ```
@@ -533,6 +535,8 @@ By carefully scheduling the movement and computation of these tiles, we can effe
 
 A typical tiled GEMM algorithm is depict below
 
+<img src="imgs/tiled_GEMM.png">
+
 ❓**Question: Normally, matrices in HBM are stored in row-major layout, if we want to load a tile from the matrix, can we still use `flex_dma_async_1d`? is it effecient?**
 
 In SoftHier, we provide DMA 2D transfer APIs for efficient tile access.
@@ -549,7 +553,11 @@ flex_dma_async_2d(
 
 It describes a sequence of strided block transfers, as depicted in the figure below.
 
+<img src="imgs/2ddma.png">
+
 ❓ **Question: Given a row-major layout big matrix, and you want to load a tile inside it to L1 memory, and the loaded tile in L1 is also row-major layout, as shown below, how would you use `flex_dma_async_2d` for it?**
+
+<img src="imgs/2dexe.png">
 
 Now let's do a complete large 32×128×32 GEMM on a single cluster with an L1 tile size of 8×8×8. I have the code template as follows; try filling in the code to iterate over tiles of A and B for the current C tile, and compute C += A * B in L1. Test them in `exercise/PartII/B.1`.
 
