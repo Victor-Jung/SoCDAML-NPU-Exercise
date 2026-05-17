@@ -772,12 +772,14 @@ int main()
 }
 ```
 
-please try `make trace` to generate `perfetto.json` file inside the `/app/PartII/B.1`, view them on [Perfetto UI](https://ui.perfetto.dev/) in your browser.
+Please try `make trace` to generate the `perfetto.json` file inside `/app/PartII/B.1`, and view it on [Perfetto UI](https://ui.perfetto.dev/) in your browser. Below is an example screenshot. In this exercise, we only focus on the workload region in the middle. Please zoom in on this part to view the trace details.
 
-❓ **Question: What did you observe? Is the RedMule in Cluster 0 fully utilized? If not, why are the RedMule units sometimes idle? Do you have any ideas to improve the utilization?**
+<img src="imgs/trace.png">
+
+❓ **Question: What did you observe? Is the RedMule in Cluster 0 fully utilized during the workload region? If not, why are the RedMule units sometimes idle? Do you have any ideas for improving the utilization?**
 
 
-<!-- <span style="color:red">**Caution:** Exercises II-B.2, II-C.1, and II-C.2 are bonus exercises that take a deeper dive into performance engineering for tile-based many-PE architecture programming. Beginners may need > 1.5hr to solve and understand them. We strongly suggest jumping to the Part III exercises first, then returning to these exercises if you have time left.</span> -->
+<span style="color:red">**Caution:** Exercises II-B.2, II-C.1, and II-C.2 are bonus exercises that take a deeper dive into performance engineering for tile-based many-PE architecture programming. Beginners may need > 1.5hr to solve and understand them. We strongly suggest jumping to the Part III exercises first, then returning to these exercises if you have time left.</span>
 
 #### (Bonus) Exercise II-B.2:
 One common trick is **double buffering**. This means allocating two buffers in L1 so that while one buffer is being used by the RedMule engine for matrix multiplication, the other can be filled with the next tile via DMA. By overlapping DMA transfers with computation, you can improve overall utilization.
@@ -919,7 +921,7 @@ int main()
 }
 ```
 
-❓ **Question: Did you observe runtime overlap in the trace viewer? Did you manage to improve overall utilization?**
+❓ **Question: Did you observe runtime overlap in the trace viewer? Did you manage to improve overall utilization during the workload region?**
 
 
 
@@ -1043,15 +1045,15 @@ int main()
 #### (Bonus) Exercise II-C.2:
 In the II-C.1 example, although each cluster computes its own C tile, different clusters still share A and B tiles. If we ignore this data reuse, as in II-C.1, redundant accesses to HBM create significant congestion on the NoC. We need to adjust the dataflow for GEMM across multiple clusters.
 
-**Question: Do you remember the `systolic execution` you learned in the lecture? Does this dataflow pattern give you any ideas for optimization?**
+❓ **Question: Do you remember the `systolic execution` you learned in the lecture? Does this dataflow pattern give you any ideas for optimization?**
 
 In `/app/PartII/C.2`, we prepared example code for dataflow optimization. Try to run it and view the trace. In the code, we use `remote_cid(cluster_id, offset)` to access the L1 memory space of remote clusters.
 
-**Question: How much speedup does it bring compared to Exercise II-C.1? Can you draw its dataflow design? What is the key to improving the performance?**
+❓ **Question: How much speedup does it bring compared to Exercise II-C.1? Can you draw its dataflow design? What is the key to improving the performance?**
 
 In `/app/PartII/C.2.opt`, we further optimize the code with a small change. Try to run it and view the trace.
 
-**Question: Does it further improve the performance? Why?**
+❓ **Question: Does it further improve the performance? Why?**
 
 
 
