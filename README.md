@@ -133,10 +133,40 @@ This infrastructure is one of MLIR's main advantages: building a new compiler di
 
 # Part II: Bare-Metal C Programming of the SoftHier NPU
 
-All materials are located in the `exercise/PartII/` folder. For each individual exercise, navigate to its corresponding subfolder. Use `make run` to execute the SoftHier simulation with the provided code. To generate a trace file, run `make trace`.
+### Installation
 
-To view the generated `build/trace.pfto` file, open the following URL in your browser:
+A Singularity container file (`.sif`) with SoftHier and its dependencies has been installed on the system. First, build the sandbox container:
+
+```bash
+mkdir -p /scratch/$USER
+singularity build --sandbox /scratch/$USER/SoftHierContainer/ /home/soc_099fs26/Downloads/softhier.sif
+```
+
+All exercises for Part II are available in:
+
+```bash
+/scratch/$USER/SoftHierContainer/app/PartII
+```
+
+To start an interactive shell inside the container, run the following command from your home directory:
+
+```bash
+singularity shell --writable --cleanenv --contain /scratch/$USER/SoftHierContainer/
+```
+
+Each time you enter the container shell, navigate to `/app` and source the setup script to set up the required environment:
+
+```bash
+cd /app
+source sourceme.sh
+```
+
+All materials are located in the `/app/PartII/` folder. For each individual exercise, navigate to its corresponding subfolder. Use `make run` to execute the SoftHier simulation with the provided code. To generate a trace file, run `make trace`.
+
+To view the generated `perfetto.json` file inside the `/app/PartII/<exercise>`, open the following URL in your browser:
 👉 [Perfetto UI](https://ui.perfetto.dev/)
+
+### Architecture Configuration Overview
 
 In this exercise, the architectural parameters of the SoftHier system are fixed as shown below. The system consists of a 4×4 cluster grid, with each cluster containing two cores: core 0 is attached to the RedMule matrix engine, while core 1 controls DMA for data movement.
 
@@ -147,8 +177,8 @@ The L1 memory is divided into two sections: `.l1_share` for user-defined variabl
 ### A. Familiarization with SoftHier
 
 #### Exercise II-A.1:
-Let's start with data movement. The following simple code for SoftHier allocates a buffer in Cluster 0 L1 memory, and Cluster 0 uses DMA to load data from HBM to the L1 buffer. Have a try in `exercise/PartII/A.1`
-```
+Let's start with data movement. The following simple code for SoftHier allocates a buffer in Cluster 0 L1 memory, and Cluster 0 uses DMA to load data from HBM to the L1 buffer. Have a try in `/app/PartII/A.1`
+```c
 #include "flex_runtime.h"
 #include "flex_alloc.h"
 #include "flex_dma_pattern.h"
@@ -169,9 +199,9 @@ uint16_t * L1_buffer_addess __attribute__((section(".l1_share")));
 int main()
 {
     uint32_t eoc_val = 0;
-    flex_barrier_xy_init();
+    flex_barrier_init();
     flex_alloc_init();
-    flex_global_barrier_xy();
+    flex_global_barrier();
     /**************************************/
     /*  Program Execution Region -- Start */
     /**************************************/
@@ -196,7 +226,7 @@ int main()
     }
 
     // Check the result after DMA transfer
-    flex_global_barrier_xy();
+    flex_global_barrier();
     if(cluster_id == 0 && core_id == 0) { // Only core 0 in cluster 0 will print the result
         printf("Matrix A in L1:\n");
         print_array_uint16(L1_buffer_addess, MATRIX_DIM, MATRIX_DIM);
@@ -205,14 +235,14 @@ int main()
     /**************************************/
     /*  Program Execution Region -- Stop  */
     /**************************************/
-    flex_global_barrier_xy();
+    flex_global_barrier();
     flex_eoc(eoc_val);
     return 0;
 }
 ```
 
 Let's go through the code line by line.
-```
+```c
 #include "flex_runtime.h"
 #include "flex_alloc.h"
 #include "flex_dma_pattern.h"
@@ -221,7 +251,7 @@ Let's go through the code line by line.
 ```
 This includes the necessary SoftHier runtime functions and APIs for synchronization, L1 allocation, DMA invocation, and printing.
 
-```
+```c
 #define MATRIX_DIM 4
 #define MATRIX_SIZE_BYTES (MATRIX_DIM * MATRIX_DIM * sizeof(uint16_t))
 
@@ -233,22 +263,22 @@ uint16_t A_in_HBM[MATRIX_DIM * MATRIX_DIM] __attribute__((section(".hbm_west")))
 ```
 Here, we declare a 4 × 4 `uint16_t` matrix, where `__attribute__((section(".hbm_west")))` tells the compiler to place it in West HBM.
 
-```
+```c
 uint16_t * L1_buffer_addess __attribute__((section(".l1_share")));
 ```
 This declares a pointer to the L1 buffer that will be allocated at runtime. This variable is located in the `.l1_share` section, meaning that any core in the same cluster has shared access to it.
 
 When entering the `main` function:
-```
-flex_barrier_xy_init();
+```c
+flex_barrier_init();
 flex_alloc_init();
-flex_global_barrier_xy();
+flex_global_barrier();
 ```
-This is the essential initialization process for SoftHier, in terms of barrier and allocator functions. We will keep this for all SoftHier programs. After initialization, a global barrier, `flex_global_barrier_xy()`, synchronizes every core across all clusters.
+This is the essential initialization process for SoftHier, in terms of barrier and allocator functions. We will keep this for all SoftHier programs. After initialization, a global barrier, `flex_global_barrier()`, synchronizes every core across all clusters.
 
 *Note*: Remember that every core executes the same piece of code. Therefore, we need to get each core’s cluster ID and core ID within the cluster for identification, and use `if` conditions to select cores and assign different jobs.
 So we see:
-```
+```c
 uint32_t cluster_id = flex_get_cluster_id(); // Get cluster ID
 uint32_t core_id = flex_get_core_id(); // Get core ID
 if(cluster_id == 0) { // Only cluster 0 will perform memory allocation and data movement
@@ -259,12 +289,12 @@ if(cluster_id == 0) { // Only cluster 0 will perform memory allocation and data 
 ```
 
 Within the Core 1 scope, we do:
-```
+```c
 L1_buffer_addess = (uint16_t *)flex_l1_malloc(MATRIX_SIZE_BYTES);
 ```
 to allocate a buffer in Cluster 0.
 
-```
+```c
 flex_dma_async_1d(
     (uint32_t)L1_buffer_addess, // destination address
     (uint32_t)A_in_HBM, // source address
@@ -274,9 +304,9 @@ flex_dma_async_wait_all();
 This sends a 1D DMA transfer job. The function `flex_dma_async_1d` accepts three inputs: destination address, source address, and transfer size in bytes. The `flex_dma_async_1d` function is nonblocking, so we use `flex_dma_async_wait_all()` to wait for the DMA jobs to complete.
 
 Outside the Core 1 scope, we check the result:
-```
+```c
 // Check the result after DMA transfer
-flex_global_barrier_xy();
+flex_global_barrier();
 if(cluster_id == 0 && core_id == 0) { // Only core 0 in cluster 0 will print the result
     printf("Matrix A in L1:\n");
     print_array_uint16(L1_buffer_addess, MATRIX_DIM, MATRIX_DIM);
@@ -284,7 +314,7 @@ if(cluster_id == 0 && core_id == 0) { // Only core 0 in cluster 0 will print the
 ```
 Here, Core 0, instead of Core 1, prints the data in the allocated L1 buffer.
 
-❓**Question: Why do we need a `flex_global_barrier_xy()` here?**
+❓**Question: Why do we need a `flex_global_barrier()` here?**
 
 
 
@@ -296,7 +326,7 @@ Here, Core 0, instead of Core 1, prints the data in the allocated L1 buffer.
 #### Exercise II-A.2:
 In the following code, we declare a matrix `B` in South HBM. Complete the code below to use DMA to copy `A` from West HBM → L1 buffer → `B` in South HBM.
 
-```
+```c
 #include "flex_runtime.h"
 #include "flex_alloc.h"
 #include "flex_dma_pattern.h"
@@ -324,9 +354,9 @@ uint16_t * L1_buffer_addess __attribute__((section(".l1_share")));
 int main()
 {
     uint32_t eoc_val = 0;
-    flex_barrier_xy_init();
+    flex_barrier_init();
     flex_alloc_init();
-    flex_global_barrier_xy();
+    flex_global_barrier();
     /**************************************/
     /*  Program Execution Region -- Start */
     /**************************************/
@@ -348,7 +378,6 @@ int main()
             // Wait for DMA transfer to complete
             flex_dma_async_wait_all();
 
-
             /*******************/
             /*  Your Code Here */
             /*******************/
@@ -356,7 +385,7 @@ int main()
     }
 
     // Check the result after DMA transfer
-    flex_global_barrier_xy();
+    flex_global_barrier();
     if(cluster_id == 0 && core_id == 0) { // Only core 0 in cluster 0 will print the result
         printf("Matrix B in HBM:\n");
         print_array_uint16(B_in_HBM, MATRIX_DIM, MATRIX_DIM);
@@ -365,7 +394,7 @@ int main()
     /**************************************/
     /*  Program Execution Region -- Stop  */
     /**************************************/
-    flex_global_barrier_xy();
+    flex_global_barrier();
     flex_eoc(eoc_val);
     return 0;
 }
@@ -401,10 +430,10 @@ typedef enum {
 
 Finally, use `flex_redmule_wait()` to wait for RedMule to complete the issued matrix multiplication job.
 
-❓**Question: Here, we have three matrices, `A`, `B`, and `C`, in HBM, and we want to: 1. load them into L1, and 2. compute `C += A * B`. If the code looks like the following, will we get the correct result? Did you observe any bugs? Why? Try it in `exercise/PartII/A.3`.**
+❓**Question: Here, we have three matrices, `A`, `B`, and `C`, in HBM, and we want to: 1. load them into L1, and 2. compute `C += A * B`. If the code looks like the following, will we get the correct result? Did you observe any bugs? Why? Try it in `/app/PartII/A.3`.**
 
 
-```
+```c
 #include "flex_runtime.h"
 #include "flex_alloc.h"
 #include "flex_dma_pattern.h"
@@ -433,6 +462,12 @@ uint16_t C_in_HBM[MATRIX_DIM * MATRIX_DIM] __attribute__((section(".hbm_south"))
      0, 0, 0, 0,
      0, 0, 0, 0,
      0, 0, 0, 0};
+
+uint16_t Golden_in_HBM[MATRIX_DIM * MATRIX_DIM] __attribute__((section(".hbm_west"))) =
+    {4,  3,  2,  1,
+     8,  7,  6,  5,
+     12, 11, 10, 9,
+     16, 15, 14, 13};
 
 uint16_t * L1_A_addess __attribute__((section(".l1_share")));
 uint16_t * L1_B_addess __attribute__((section(".l1_share")));
@@ -480,6 +515,12 @@ int main()
             flex_dma_async_wait_all();
         }
 
+        /*********************************/
+        /* Should we add something here? */
+        /*********************************/
+
+
+
         if(core_id == 0) { // Only core 0 will configure and trigger the RedMule
             // Configure RedMule for matrix multiplication
             flex_redmule_config(MATRIX_DIM, MATRIX_DIM, MATRIX_DIM);
@@ -490,13 +531,31 @@ int main()
             // Wait for RedMule computation to complete
             flex_redmule_wait();
         }
+
+        /*********************************/
+        /* Should we add something here? */
+        /*********************************/
+
+
+
+        if(core_id == 1) { // Only core 1 (with DMA attached) will perform memory allocation to the L1 buffer
+            // DMA transfer from L1 to HBM
+            flex_dma_async_1d(
+                (uint32_t)C_in_HBM, // destination address in HBM
+                (uint32_t)L1_C_addess, // source address in L1
+                MATRIX_SIZE_BYTES); // size of data to transfer
+
+            // Wait for DMA transfer to complete
+            flex_dma_async_wait_all();
+        }
     }
 
     // Check the result after DMA transfer
     flex_global_barrier_xy();
     if(cluster_id == 0 && core_id == 0) { // Only core 0 in cluster 0 will print the result
-        printf("Matrix C in L1:\n");
-        print_array_uint16(L1_C_addess, MATRIX_DIM, MATRIX_DIM);
+        printf("Matrix C in HBM:\n");
+        print_array_uint16(C_in_HBM, MATRIX_DIM, MATRIX_DIM);
+        check_results_uint16(C_in_HBM, Golden_in_HBM, MATRIX_DIM, MATRIX_DIM);
     }
 
     /**************************************/
@@ -509,7 +568,7 @@ int main()
 ```
 In SoftHier, we have the `flex_intra_cluster_sync()` function to synchronize cores within their cluster. Will this help solve the problem above? Where would you put it? After that, can the simulation pass and produce the correct result?
 
-❓**Question: Why are both `flex_global_barrier_xy()` and `flex_intra_cluster_sync()` essential for SoftHier?**
+❓**Question: Why are both `flex_global_barrier()` and `flex_intra_cluster_sync()` essential for SoftHier?**
 
 
 
@@ -545,12 +604,12 @@ In SoftHier, we provide DMA 2D transfer APIs for efficient tile access.
 
 ```
 flex_dma_async_2d(
-    dst_addr,
-    src_addr,
-    transfer_size,
-    dst_stride,
-    src_stride,
-    repeat)
+    uint32_t dst_addr,
+    uint32_t src_addr,
+    uint32_t transfer_size,
+    uint32_t dst_stride,
+    uint32_t src_stride,
+    uint32_t repeat)
 ```
 
 It describes a sequence of strided block transfers, as depicted in the figure below.
@@ -561,7 +620,23 @@ It describes a sequence of strided block transfers, as depicted in the figure be
 
 <img src="imgs/2dexe.png">
 
-Now let's do a complete large 32×128×32 GEMM on a single cluster with an L1 tile size of 8×8×8. I have the code template as follows; try filling in the code to iterate over tiles of A and B for the current C tile, and compute C += A * B in L1. Test them in `exercise/PartII/B.1`.
+<details>
+<summary><strong>Solution</strong></summary>
+
+```c
+// Suppose data type is data_t, in our exercise we use uint16_t as an example
+flex_dma_async_2d(
+    (uint32_t)L1_addr, // destination address in L1
+    (uint32_t)HBM_addr + (m * K + k) * sizeof(data_t), // source address in HBM
+    tile_k * sizeof(data_t), // size of each row
+    tile_k * sizeof(data_t), // dest stride (row stride in L1)
+    K * sizeof(data_t), // source stride (row stride in HBM)
+    tile_m);// number of rows
+```
+
+</details>
+
+Now let's do a complete large 32×1024×32 GEMM on a single cluster with an L1 tile size of 8×8×8. I have the code template as follows; try filling in the code to iterate over tiles of A and B for the current C tile, and compute C += A * B in L1. Test them in `/app/PartII/B.1`.
 
 ```c
 #include "flex_runtime.h"
@@ -572,7 +647,7 @@ Now let's do a complete large 32×128×32 GEMM on a single cluster with an L1 ti
 #include "flex_redmule.h"
 
 #define M 32
-#define N 128   // shared dimension
+#define N 1024   // shared dimension
 #define K 32
 
 #define TILE_M 8
@@ -598,6 +673,12 @@ uint16_t C_in_HBM[M * K] __attribute__((section(".hbm_south"))) = {
     #include "C_in_HBM.txt"
 };
 
+
+// Golden: [M x K] stored in West HBM (golden results to check)
+uint16_t Golden_in_HBM[M * K] __attribute__((section(".hbm_west"))) = {
+    #include "Golden_in_HBM.txt"
+};
+
 uint16_t * L1_A_addess __attribute__((section(".l1_share")));
 uint16_t * L1_B_addess __attribute__((section(".l1_share")));
 uint16_t * L1_C_addess __attribute__((section(".l1_share")));
@@ -605,9 +686,10 @@ uint16_t * L1_C_addess __attribute__((section(".l1_share")));
 int main()
 {
     uint32_t eoc_val = 0;
-    flex_barrier_xy_init();
+    flex_barrier_init();
     flex_alloc_init();
-    flex_global_barrier_xy();
+    flex_global_barrier();
+    performance_counter_start();
     /**************************************/
     /*  Program Execution Region -- Start */
     /**************************************/
@@ -634,7 +716,7 @@ int main()
                     flex_dma_async_2d(
                         (uint32_t)L1_C_addess, // destination address in L1
                         (uint32_t)C_in_HBM + (m * K + k) * sizeof(uint16_t), // source address in HBM
-                        TILE_K * sizeof(uint16_t), // size of each row
+                        TILE_K * sizeof(uint16_t), // size of each tiled row
                         TILE_K * sizeof(uint16_t), // dest stride (row stride in L1)
                         K * sizeof(uint16_t), // source stride (row stride in HBM)
                         TILE_M);// number of rows
@@ -650,6 +732,7 @@ int main()
                     /*******************/
                     /* Your Code Here */
                     /*******************/
+
                 }
 
 
@@ -671,33 +754,37 @@ int main()
         }
     }
 
-    // Check the result after DMA transfer
-    flex_global_barrier_xy();
+    // Check the result
+    flex_global_barrier();
+    performance_counter_stop();
     if(cluster_id == 0 && core_id == 0) { // Only core 0 in cluster 0 will print the result
         printf("Matrix C in HBM:\n");
         print_array_uint16(C_in_HBM, M, K);
+        check_results_uint16(C_in_HBM, Golden_in_HBM, M, K);
     }
 
     /**************************************/
     /*  Program Execution Region -- Stop  */
     /**************************************/
-    flex_global_barrier_xy();
+    flex_global_barrier();
     flex_eoc(eoc_val);
     return 0;
 }
 ```
 
-please try `make trace` to generate `build/trace.pfto` file in the folder, view them on [Perfetto UI](https://ui.perfetto.dev/) in your browser.
+please try `make trace` to generate `perfetto.json` file inside the `/app/PartII/B.1`, view them on [Perfetto UI](https://ui.perfetto.dev/) in your browser.
 
 ❓ **Question: What did you observe? Is the RedMule in Cluster 0 fully utilized? If not, why are the RedMule units sometimes idle? Do you have any ideas to improve the utilization?**
 
 
-#### Exercise II-B.1:
+<!-- <span style="color:red">**Caution:** Exercises II-B.2, II-C.1, and II-C.2 are bonus exercises that take a deeper dive into performance engineering for tile-based many-PE architecture programming. Beginners may need > 1.5hr to solve and understand them. We strongly suggest jumping to the Part III exercises first, then returning to these exercises if you have time left.</span> -->
+
+#### (Bonus) Exercise II-B.2:
 One common trick is **double buffering**. This means allocating two buffers in L1 so that while one buffer is being used by the RedMule engine for matrix multiplication, the other can be filled with the next tile via DMA. By overlapping DMA transfers with computation, you can improve overall utilization.
 
-Now, let’s apply double buffering to the A and B tiles and optimize the inner loop that iterates over tiles of A and B for computing C += A × B. we have define double allocation for A and B tiles, please filling in the code below in `exercise/PartII/B.2`
+Now, let’s apply double buffering to the A and B tiles and optimize the inner loop that iterates over tiles of A and B for computing C += A × B. we have define double allocation for A and B tiles, please filling in the code below in `/app/PartII/B.2`
 
-```
+```c
 #include "flex_runtime.h"
 #include "flex_alloc.h"
 #include "flex_dma_pattern.h"
@@ -706,7 +793,7 @@ Now, let’s apply double buffering to the A and B tiles and optimize the inner 
 #include "flex_redmule.h"
 
 #define M 32
-#define N 128   // shared dimension
+#define N 1024   // shared dimension
 #define K 32
 
 #define TILE_M 8
@@ -732,6 +819,12 @@ uint16_t C_in_HBM[M * K] __attribute__((section(".hbm_south"))) = {
     #include "C_in_HBM.txt"
 };
 
+
+// Golden: [M x K] stored in West HBM (golden results to check)
+uint16_t Golden_in_HBM[M * K] __attribute__((section(".hbm_west"))) = {
+    #include "Golden_in_HBM.txt"
+};
+
 uint16_t * L1_A1_addess __attribute__((section(".l1_share")));
 uint16_t * L1_B1_addess __attribute__((section(".l1_share")));
 uint16_t * L1_A2_addess __attribute__((section(".l1_share")));
@@ -741,9 +834,10 @@ uint16_t * L1_C_addess __attribute__((section(".l1_share")));
 int main()
 {
     uint32_t eoc_val = 0;
-    flex_barrier_xy_init();
+    flex_barrier_init();
     flex_alloc_init();
-    flex_global_barrier_xy();
+    flex_global_barrier();
+    performance_counter_start();
     /**************************************/
     /*  Program Execution Region -- Start */
     /**************************************/
@@ -772,7 +866,7 @@ int main()
                     flex_dma_async_2d(
                         (uint32_t)L1_C_addess, // destination address in L1
                         (uint32_t)C_in_HBM + (m * K + k) * sizeof(uint16_t), // source address in HBM
-                        TILE_K * sizeof(uint16_t), // size of each row
+                        TILE_K * sizeof(uint16_t), // size of each tiled row
                         TILE_K * sizeof(uint16_t), // dest stride (row stride in L1)
                         K * sizeof(uint16_t), // source stride (row stride in HBM)
                         TILE_M);// number of rows
@@ -783,12 +877,10 @@ int main()
                 flex_intra_cluster_sync();
 
 
-                //Iterate over tiles of A and B for the current C tile, compute C += A*B in L1
-                for(int n = 0; n < N; n += TILE_N) {
-                    /*******************/
-                    /* Your Code Here */
-                    /*******************/
-                }
+                /*******************/
+                /* Your Code Here */
+                /******************/
+
 
 
                 //store the computed C tile back to HBM
@@ -809,17 +901,19 @@ int main()
         }
     }
 
-    // Check the result after DMA transfer
-    flex_global_barrier_xy();
+    // Check the result
+    flex_global_barrier();
+    performance_counter_stop();
     if(cluster_id == 0 && core_id == 0) { // Only core 0 in cluster 0 will print the result
         printf("Matrix C in HBM:\n");
         print_array_uint16(C_in_HBM, M, K);
+        check_results_uint16(C_in_HBM, Golden_in_HBM, M, K);
     }
 
     /**************************************/
     /*  Program Execution Region -- Stop  */
     /**************************************/
-    flex_global_barrier_xy();
+    flex_global_barrier();
     flex_eoc(eoc_val);
     return 0;
 }
@@ -829,12 +923,12 @@ int main()
 
 
 
-### C. Large GEMM on Multiple Clusters
+### C. (Bonus) Large GEMM on Multiple Clusters
 
-#### Exercise II-C.1:
-Since the SoftHier system not only has one cluster, we want to leverage multiple clusters to accelerate the large GEMM computation. Here, we still focus on a complete 32×128×32 GEMM with an L1 tile size of 8×8×8.
+#### (Bonus) Exercise II-C.1:
+Since the SoftHier system not only has one cluster, we want to leverage multiple clusters to accelerate the large GEMM computation. Here, we still focus on a complete 32×1024×32 GEMM with an L1 tile size of 8×8×8.
 
-A first question that comes up is how to parallelize the workload across multiple clusters. It is easy to notice that the output C matrix has 16 tiles; we can assign each cluster to work individually on one tile of the C matrix. Now, please implement this parallelism by filling in the following code.
+A first question that comes up is how to parallelize the workload across multiple clusters. It is easy to notice that the output C matrix has 16 tiles; we can assign each cluster to work individually on one tile of the C matrix. Now, please implement this parallelism by filling in the following code in `/app/PartII/C.1`.
 
 Tips:
 
@@ -851,7 +945,7 @@ Tips:
 #include "flex_redmule.h"
 
 #define M 32
-#define N 128   // shared dimension
+#define N 1024   // shared dimension
 #define K 32
 
 #define TILE_M 8
@@ -877,6 +971,12 @@ uint16_t C_in_HBM[M * K] __attribute__((section(".hbm_south"))) = {
     #include "C_in_HBM.txt"
 };
 
+
+// Golden: [M x K] stored in West HBM (golden results to check)
+uint16_t Golden_in_HBM[M * K] __attribute__((section(".hbm_west"))) = {
+    #include "Golden_in_HBM.txt"
+};
+
 uint16_t * L1_A1_addess __attribute__((section(".l1_share")));
 uint16_t * L1_B1_addess __attribute__((section(".l1_share")));
 uint16_t * L1_A2_addess __attribute__((section(".l1_share")));
@@ -886,15 +986,18 @@ uint16_t * L1_C_addess __attribute__((section(".l1_share")));
 int main()
 {
     uint32_t eoc_val = 0;
-    flex_barrier_xy_init();
+    flex_barrier_init();
     flex_alloc_init();
-    flex_global_barrier_xy();
+    flex_global_barrier();
+    performance_counter_start();
     /**************************************/
     /*  Program Execution Region -- Start */
     /**************************************/
 
     uint32_t cluster_id = flex_get_cluster_id(); // Get cluster ID
     uint32_t core_id = flex_get_core_id(); // Get core ID
+    uint32_t cluster_id_x = cluster_id % 4;
+    uint32_t cluster_id_y = cluster_id / 4;
 
     //Allocate L1 memory for A, B, C tiles
     if(core_id == 0) { // Only core 0 in cluster 0 will perform memory allocation
@@ -907,53 +1010,29 @@ int main()
 
     // Synchronize to ensure memory allocation is done before other core accesses the L1 addresses
     flex_intra_cluster_sync();
-
-    //load C tile from HBM to L1
-    if(core_id == 1){
-        flex_dma_async_2d(
-            /*******************/
-            /* Your Code Here */
-            /*******************/
-        );// number of rows
-        
-        // Wait for DMA transfer to complete
-        flex_dma_async_wait_all();
-    }
-    flex_intra_cluster_sync();
+    uint32_t m = cluster_id_y * TILE_M;
+    uint32_t k = cluster_id_x * TILE_K;
 
 
-    //Iterate over tiles of A and B for the current C tile, compute C += A*B in L1
-    for(int n = 0; n < N; n += TILE_N) {
-        /*******************/
-        /* Your Code Here */
-        /*******************/
-    }
+    /******************/
+    /* Your Code Here */
+    /******************/
 
 
-    //store the computed C tile back to HBM
-    if(core_id == 1){
-        flex_dma_async_2d(
-            /*******************/
-            /* Your Code Here */
-            /*******************/
-        );// number of rows
-        
-        // Wait for DMA transfer to complete
-        flex_dma_async_wait_all();
-    }
 
-
-    // Check the result after DMA transfer
-    flex_global_barrier_xy();
+    // Check the result
+    flex_global_barrier();
+    performance_counter_stop();
     if(cluster_id == 0 && core_id == 0) { // Only core 0 in cluster 0 will print the result
         printf("Matrix C in HBM:\n");
         print_array_uint16(C_in_HBM, M, K);
+        check_results_uint16(C_in_HBM, Golden_in_HBM, M, K);
     }
 
     /**************************************/
     /*  Program Execution Region -- Stop  */
     /**************************************/
-    flex_global_barrier_xy();
+    flex_global_barrier();
     flex_eoc(eoc_val);
     return 0;
 }
@@ -961,12 +1040,20 @@ int main()
 
 ❓ **Question: Did you observe the same high utilization as in the single-cluster GEMM? Why?**
 
-#### Exercise II-C.2 (Optional):
+#### (Bonus) Exercise II-C.2:
 In the II-C.1 example, although each cluster computes its own C tile, different clusters still share A and B tiles. If we ignore this data reuse, as in II-C.1, redundant accesses to HBM create significant congestion on the NoC. We need to adjust the dataflow for GEMM across multiple clusters.
 
-Do you remember the `systolic execution` you learned in the lecture? Does this dataflow pattern give you any ideas for optimization? Try to design a more efficient GEMM implementation for multiple clusters.
+**Question: Do you remember the `systolic execution` you learned in the lecture? Does this dataflow pattern give you any ideas for optimization?**
 
-(This exercise is optional, as it may take a considerable amount of time. You can skip it for now.)
+In `/app/PartII/C.2`, we prepared example code for dataflow optimization. Try to run it and view the trace. In the code, we use `remote_cid(cluster_id, offset)` to access the L1 memory space of remote clusters.
+
+**Question: How much speedup does it bring compared to Exercise II-C.1? Can you draw its dataflow design? What is the key to improving the performance?**
+
+In `/app/PartII/C.2.opt`, we further optimize the code with a small change. Try to run it and view the trace.
+
+**Question: Does it further improve the performance? Why?**
+
+
 
 # Part III: Faster NPU Programming with MLIR and IRON
 
@@ -980,7 +1067,7 @@ void sender(addr_t data_offset, uint32_t dest_cid,
             addr_t buf_a_offset, addr_t buf_b_offset)
 {
     for (uint32_t i = 0; i < n_tiles; i++) {
-        if (flex_is_dm_core()) {
+        if (core_id == 1) {
             addr_t dst = (i % 2 == 0) ? buf_a_offset : buf_b_offset;
             flex_dma_async_1d(
                 remote_cid(dest_cid, dst),
@@ -988,7 +1075,7 @@ void sender(addr_t data_offset, uint32_t dest_cid,
                 tile_size);
             flex_dma_async_wait_all();
         }
-        flex_global_barrier_xy();  // synchronize with receiver
+        flex_global_barrier();  // synchronize with receiver
     }
 }
 
@@ -996,8 +1083,8 @@ void receiver(uint32_t tile_size, uint32_t tile_dim, uint32_t n_tiles,
               addr_t buf_a, addr_t buf_b, addr_t acc)
 {
     for (uint32_t i = 0; i < n_tiles; i++) {
-        flex_global_barrier_xy();  // wait for data
-        if (flex_id_first_core()) {
+        flex_global_barrier();  // wait for data
+        if (core_id == 0) {
             addr_t src = (i % 2 == 0) ? buf_a : buf_b;
             flex_redmule_config(tile_dim, tile_dim, tile_dim);
             flex_redmule_trigger((uint32_t)src, (uint32_t)src,
