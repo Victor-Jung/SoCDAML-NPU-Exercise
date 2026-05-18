@@ -778,10 +778,7 @@ Please try `make trace` to generate the `perfetto.json` file inside `/app/PartII
 
 ❓ **Question: What did you observe? Is the RedMule in Cluster 0 fully utilized during the workload region? If not, why are the RedMule units sometimes idle? Do you have any ideas for improving the utilization?**
 
-
-<span style="color:red">**Caution:** Exercises II-B.2, II-C.1, and II-C.2 are bonus exercises that take a deeper dive into performance engineering for tile-based many-PE architecture programming. Beginners may need > 1.5hr to solve and understand them. We strongly suggest jumping to the Part III exercises first, then returning to these exercises if you have time left.</span>
-
-#### (Bonus) Exercise II-B.2:
+#### Exercise II-B.2:
 One common trick is **double buffering**. This means allocating two buffers in L1 so that while one buffer is being used by the RedMule engine for matrix multiplication, the other can be filled with the next tile via DMA. By overlapping DMA transfers with computation, you can improve overall utilization.
 
 Now, let’s apply double buffering to the A and B tiles and optimize the inner loop that iterates over tiles of A and B for computing C += A × B. we have define double allocation for A and B tiles, please filling in the code below in `/app/PartII/B.2`
@@ -925,9 +922,9 @@ int main()
 
 
 
-### C. (Bonus) Large GEMM on Multiple Clusters
+### C. Large GEMM on Multiple Clusters
 
-#### (Bonus) Exercise II-C.1:
+#### Exercise II-C.1:
 Since the SoftHier system not only has one cluster, we want to leverage multiple clusters to accelerate the large GEMM computation. Here, we still focus on a complete 32×1024×32 GEMM with an L1 tile size of 8×8×8.
 
 A first question that comes up is how to parallelize the workload across multiple clusters. It is easy to notice that the output C matrix has 16 tiles; we can assign each cluster to work individually on one tile of the C matrix. Now, please implement this parallelism by filling in the following code in `/app/PartII/C.1`.
@@ -1042,7 +1039,7 @@ int main()
 
 ❓ **Question: Did you observe the same high utilization as in the single-cluster GEMM? Why?**
 
-#### (Bonus) Exercise II-C.2:
+#### Exercise II-C.2:
 In the II-C.1 example, although each cluster computes its own C tile, different clusters still share A and B tiles. If we ignore this data reuse, as in II-C.1, redundant accesses to HBM create significant congestion on the NoC. We need to adjust the dataflow for GEMM across multiple clusters.
 
 ❓ **Question: Do you remember the `systolic execution` you learned in the lecture? Does this dataflow pattern give you any ideas for optimization?**
