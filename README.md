@@ -166,6 +166,8 @@ All materials are located in the `/app/PartII/` folder. For each individual exer
 To view the generated `perfetto.json` file inside the `/app/PartII/<exercise>`, open the following URL in your browser:
 👉 [Perfetto UI](https://ui.perfetto.dev/)
 
+We also have reference solution in `/app/.solution`  (look only after attempting!)
+
 ### Architecture Configuration Overview
 
 In this exercise, the architectural parameters of the SoftHier system are fixed as shown below. The system consists of a 4×4 cluster grid, with each cluster containing two cores: core 0 is attached to the RedMule matrix engine, while core 1 controls DMA for data movement.
@@ -406,9 +408,12 @@ Core 0 is attached to the RedMule matrix engine. Use `#include "flex_redmule.h"`
 void flex_redmule_config(uint16_t m_size, uint16_t n_size, uint16_t k_size)
 ```
 
-This configures the matrix multiplication dimensions. The `m`, `n`, and `k` annotations are shown in the following figure.
+This configures the matrix multiplication dimensions. The `m`, `n`, and `k` annotations are shown in the following figure. 
 
 <img src="imgs/RedMule_annotate.png">
+
+*Note: In Exercise Part II, we use the **M–N–K** notation for matrix–matrix multiplication, where **N** is the shared/reduction dimension. This aligns with the [RedMulE paper](https://arxiv.org/abs/2301.03904). However, in Part III, we switch to the **M–K–N** notation, where **K** is the shared/reduction dimension.*
+
 
 ```c
 void flex_redmule_trigger(uint32_t x_addr, uint32_t w_addr, uint32_t y_addr, redmule_compute_format_t format)
